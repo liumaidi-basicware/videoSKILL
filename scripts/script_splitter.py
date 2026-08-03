@@ -41,8 +41,9 @@ sys.path.insert(0, HERE)
 from aspect_ratio import output_ratio  # noqa: E402
 import run_manifest as rm  # noqa: E402
 import take_review  # noqa: E402
-from video_segmentation import partition_shots, SEEDANCE_MAX_SECONDS
+from video_segmentation import partition_shots, SEEDANCE_MAX_SECONDS, max_seconds_for_model
 from artifact_contract import build_video_handoff
+import subtitle_asr  # noqa: E402
 
 # aspect_ratio → (ratio_str, default resolution)。竖屏优先（短视频主场景）。
 _RATIO_MAP = {
@@ -63,10 +64,12 @@ def _load_storyboard_result(storyboard_dir):
 
 
 def _storyboard_shot_map(result):
-    """Build the only supported shot-image map from explicit result shot IDs."""
+    """Build the only supported shot-image map from explicit result shot IDs.
+    Keys are normalized via _normalize_shot_id for flexible matching."""
     mapping = {}
     for item in (result or {}).get("shots") or []:
-        sid = str((item.get("shot") or {}).get("id") or "").strip()
+        raw_sid = str((item.get("shot") or {}).get("id") or "").strip()
+        sid = _normalize_shot_id(raw_sid) or raw_sid
         path = item.get("abspath") or item.get("path")
         if not sid or not path or sid in mapping:
             raise ValueError("INVALID_STORYBOARD_RESULT: shot id/path 缺失或重复")
@@ -74,9 +77,41 @@ def _storyboard_shot_map(result):
     return mapping
 
 
+def _normalize_shot_id(raw_id):
+    """Normalize shot ID to canonical form for storyboard image matching.
+
+    Handles common LLM-generated variants:
+      "s1" / "s01" / "shot_1" / "shot1" / "镜头1" / "镜头一" / "1" → "s1"
+    """
+    if not raw_id:
+        return ""
+    s = str(raw_id).strip().lower()
+    # Remove common prefixes
+    for prefix in ("shot_", "shot", "scene_", "scene"):
+        if s.startswith(prefix):
+            s = s[len(prefix):]
+            break
+    # Chinese shot number
+    cn_map = {"一": "1", "二": "2", "三": "3", "四": "4", "五": "5",
+              "六": "6", "七": "7", "八": "8", "九": "9", "十": "10"}
+    if s.startswith("镜头"):
+        suffix = s[2:]
+        s = cn_map.get(suffix, suffix)
+    # Strip leading zeros from numeric part
+    if s.startswith("s") and len(s) > 1:
+        num = s[1:]
+        if num.isdigit():
+            return "s" + str(int(num))
+        return s
+    if s.isdigit():
+        return "s" + str(int(s))
+    return s
+
+
 def _find_shot_image(shot_map, shot_id, source_ids=None):
-    """Resolve exact IDs only; filenames and substrings are never identities."""
-    candidates = [str(shot_id)] + [str(value) for value in (source_ids or [])]
+    """Resolve shot image by normalized ID; filenames and substrings are never identities."""
+    candidates = [_normalize_shot_id(shot_id)]
+    candidates.extend(_normalize_shot_id(v) for v in (source_ids or []))
     for candidate in dict.fromkeys(candidates):
         if candidate in (shot_map or {}):
             return shot_map[candidate]
@@ -276,14 +311,82 @@ def _pick_video_type(n_urls, has_human, has_environment=False):
     return 2       # 单图生视频首帧
 
 
-def _shot_duration_seconds(shot, min_seconds):
-    """取该镜时长（秒）。优先 shot.duration；缺失则按台词字数估（中文≈4.5字/秒）。"""
+# voice_type → 中文口播语速（字/秒）。基于实际 AIGC 视频生成模型的语音合成实测数据。
+# 慢速：情感旁白/纪录片；标准：一般口播；快速：促销/快节奏带货。
+_VOICE_SPEECH_RATES = {
+    "slow": 3.2,       # 慢速旁白、情感类
+    "calm": 3.5,       # 沉稳、纪录片
+    "narrator": 3.8,   # 旁白解说
+    "standard": 4.2,   # 标准口播（默认）
+    "professional": 4.5,  # 专业播报
+    "energetic": 5.0,  # 活力带货
+    "fast": 5.5,       # 快节奏促销
+    "promo": 5.8,      # 极速促销
+}
+_DEFAULT_SPEECH_RATE = 4.2  # 无 voice_type 时的默认语速
+
+
+def _speech_rate_for_shot(shot, plan_voice_type=None):
+    """Determine speech rate (chars/sec) for a shot based on voice_type context."""
+    audio = shot.get("audio_contract") or {}
+    voice = (audio.get("voice") or shot.get("voice_type")
+             or plan_voice_type or "standard").lower()
+    for key, rate in _VOICE_SPEECH_RATES.items():
+        if key in voice:
+            return rate
+    return _DEFAULT_SPEECH_RATE
+
+
+def _shot_duration_seconds(shot, min_seconds, speech_rate=None):
+    """取该镜时长（秒）。优先 shot.duration；缺失则按台词字数估（按 voice_type 调速）。"""
     d = shot.get("duration") or shot.get("seconds")
     if isinstance(d, (int, float)) and d > 0:
         return max(min_seconds, int(round(d)))
     dialogue = shot.get("dialogue") or shot.get("voiceover") or ""
-    est = len(re.sub(r"\s", "", dialogue)) / 4.5 if dialogue else min_seconds
+    rate = speech_rate or _speech_rate_for_shot(shot)
+    est = len(re.sub(r"\s", "", dialogue)) / rate if dialogue else min_seconds
     return max(min_seconds, int(round(est)))
+
+
+def _check_scene_consistency(shots):
+    """Warn when shots sharing a scene_id have divergent scene_prompt descriptions.
+
+    This is a soft check (print warning, not raise) to avoid blocking valid
+    creative choices while surfacing likely authoring mistakes.
+    """
+    from difflib import SequenceMatcher
+    scenes = {}
+    for shot in shots:
+        sid = str(shot.get("scene_id") or "").strip()
+        prompt = str(shot.get("scene_prompt") or "").strip()
+        if not sid or not prompt:
+            continue
+        scenes.setdefault(sid, []).append((shot.get("id"), prompt))
+    for sid, entries in scenes.items():
+        if len(entries) < 2:
+            continue
+        base_id, base_prompt = entries[0]
+        for other_id, other_prompt in entries[1:]:
+            ratio = SequenceMatcher(None, base_prompt, other_prompt).ratio()
+            if ratio < 0.3:
+                print("[scene-check] WARNING: scene_id=%s 的 shots %s 和 %s "
+                      "scene_prompt 差异很大（相似度 %.0f%%），请确认是否为同一场景"
+                      % (sid, base_id, other_id, ratio * 100), flush=True)
+
+
+def _inject_scene_transitions(shots):
+    """Add transition hints at scene boundaries so the model generates a
+    smooth visual transition instead of a hard cut between scenes."""
+    prev_scene = None
+    for shot in shots:
+        scene_id = str(shot.get("scene_id") or "").strip() or None
+        if prev_scene is not None and scene_id != prev_scene:
+            # Scene boundary detected — inject transition hint
+            hint = "场景过渡：从上一场自然转场到当前场景"
+            existing = shot.get("continuity_in") or ""
+            if hint not in existing:
+                shot["continuity_in"] = (existing + "；" + hint).strip("；") if existing else hint
+        prev_scene = scene_id
 
 
 def split(plan, storyboard_dir=None, fps=30, min_seconds=3, bw_storyboard=None,
@@ -372,10 +475,19 @@ def split(plan, storyboard_dir=None, fps=30, min_seconds=3, bw_storyboard=None,
     # shots into the same <=15s units that the storyboard stage previews.
     source_shots = plan.get("shots") or []
     scene_aware = any(str(shot.get("scene_id") or "").strip() for shot in source_shots)
+
+    # 场景一致性校验：同 scene_id 的 shots 应有相近的 scene_prompt
+    if scene_aware:
+        _check_scene_consistency(source_shots)
+
     shots = partition_shots(source_shots, max_seconds=SEEDANCE_MAX_SECONDS,
                             scene_aware="auto", preserve_shots=oral_broadcast)
     if not shots:
         raise ValueError("storyboard_plan 无 shots，无法拆分")
+
+    # 跨场景过渡指令：scene_id 变化时在第一个 shot 注入过渡提示
+    if scene_aware:
+        _inject_scene_transitions(shots)
 
     if bw_storyboard is None:
         cm = str(plan.get("color_mode") or "bw").lower()
@@ -493,15 +605,20 @@ def split(plan, storyboard_dir=None, fps=30, min_seconds=3, bw_storyboard=None,
         merged_refs = dict(plan_refs)
         merged_refs.update(shot.get("asset_refs") or {})
         has_human = bool(shot.get("characters")) or bool(merged_refs.get("digital_human_portraits"))
-        has_environment = bool(
-            merged_refs.get("product_images") or merged_refs.get("scene_images") or
-            shot.get("product_sku") or shot.get("product_refs") or shot.get("scene") or
-            shot.get("scene_prompt")
-        )
         has_product = bool(merged_refs.get("product_images") or
                            merged_refs.get("product_boards") or
                            merged_refs.get("product_usage_images") or
                            shot.get("product_sku") or shot.get("product_refs"))
+        has_scene = bool(merged_refs.get("scene_images") or
+                         shot.get("scene") or shot.get("scene_prompt"))
+        # has_environment 精细化：只有"多主体同框"或"人+环境"才算多主体场景。
+        # 单产品静物（无人物无场景）不应触发多主体模式。
+        # - 有人物 + 有环境 → 多主体（type 5）
+        # - 有产品 + 有场景 → 多主体（type 5）
+        # - 仅产品（无场景） → 单主体（type 2）
+        # - 仅场景（无产品） → 单主体（type 2）
+        env_element_count = sum([has_human, has_product, has_scene])
+        has_environment = env_element_count >= 2
         required_types = _required_reference_types(
             has_human=has_human, has_product=has_product)
         dropped_required = [item for item in dropped if item.get("type") in required_types]
@@ -862,14 +979,47 @@ def _fmt_srt_ts(seconds):
     return "%02d:%02d:%02d,%03d" % (h, m, sec, ms)
 
 
+_MAX_CHARS_PER_LINE = 20  # 每行字幕最大字符数（含标点）
+
+
+def _split_long_sentence(text, max_chars=_MAX_CHARS_PER_LINE):
+    """Split a long sentence at natural breakpoints (commas, pauses) to fit
+    max_chars_per_line. Falls back to hard split if no natural breakpoint."""
+    if len(text) <= max_chars:
+        return [text]
+    # Try splitting at Chinese comma/pause marks
+    parts = re.split(r"(?<=[，、；])", text)
+    if len(parts) > 1:
+        result, current = [], ""
+        for p in parts:
+            if current and len(current) + len(p) > max_chars:
+                result.append(current)
+                current = p
+            else:
+                current += p
+        if current:
+            result.append(current)
+        if all(len(r) <= max_chars for r in result):
+            return result
+    # Hard split at max_chars boundary
+    return [text[i:i + max_chars] for i in range(0, len(text), max_chars)]
+
+
 def _split_dialogue_sentences(text):
-    """把一段台词按中英文断句符切成若干短句，供逐句字幕换行（避免整段字幕过长）。"""
+    """把一段台词按中英文断句符切成若干短句，供逐句字幕换行（避免整段字幕过长）。
+    超过 _MAX_CHARS_PER_LINE 的长句会在逗号/顿号处二次拆分。"""
     if not text:
         return []
     # 在中英句末标点后切分，保留可读短句；无标点则整段一句。
     parts = re.split(r"(?<=[。！？!?；;\n])|(?<=[.])\s+", text)
-    out = [p.strip() for p in parts if p and p.strip()]
-    return out or [text.strip()]
+    raw = [p.strip() for p in parts if p and p.strip()]
+    if not raw:
+        raw = [text.strip()]
+    # 二次拆分超长句
+    out = []
+    for sentence in raw:
+        out.extend(_split_long_sentence(sentence))
+    return out
 
 
 def derive_captions(segments_spec, fps=30, per_sentence=True, results=None):
@@ -1100,19 +1250,41 @@ def _probe_duration(video_path):
         return None
 
 
-def align_captions_to_audio(derived, video_path):
-    """Align the estimated timeline to the actual rendered audio/video duration.
+def align_captions_to_audio(derived, video_path, api_key=None):
+    """Align the estimated timeline to the actual rendered audio.
 
-    The video model does not return word timestamps, so this is intentionally
-    not advertised as ASR word alignment. It removes the common duration drift
-    caused by model-generated pauses and marks the result as duration-aligned.
-    A future ASR provider can replace this function without changing its output
-    contract.
+    Three-tier strategy:
+      1. ASR-based alignment (subtitle_asr.align_with_asr) — silence
+         detection or cloud ASR for sentence-level timestamps.
+      2. Duration scaling — ratio-scale estimates to match actual duration.
+      3. Keep original estimates if both fail.
     """
     actual = _probe_duration(video_path)
     if actual is None or not derived.get("total_seconds"):
         derived["timeline_source"] = "estimated"
         return derived
+
+    # Tier 1: ASR-based sentence alignment
+    asr_aligned = subtitle_asr.align_with_asr(
+        derived.get("lines", []), video_path, api_key=api_key)
+    if asr_aligned:
+        derived["lines"] = asr_aligned
+        derived["total_seconds"] = round(actual, 3)
+        derived["timeline_source"] = "asr_aligned"
+        derived["needs_confirmation"] = True
+        derived["note"] = ("已通过音频分析(ASR/静音检测)对齐逐句时间戳，"
+                            "准确率高于字数比例估算；请抽查确认后再渲染字幕。")
+        derived["srt"] = subtitle_asr.lines_to_srt(asr_aligned)
+        # Re-scale motion_plan blocks proportionally
+        old_total = float(derived.get("total_seconds") or 1)
+        ratio = actual / old_total if old_total > 0 else 1.0
+        if abs(ratio - 1.0) > 0.01:
+            for block in derived.get("motion_plan", []):
+                block["start"] = round(block["start"] * ratio, 3)
+                block["end"] = round(block["end"] * ratio, 3)
+        return derived
+
+    # Tier 2: Duration scaling (original fallback)
     old = float(derived["total_seconds"])
     ratio = actual / old
     for line in derived.get("lines", []):

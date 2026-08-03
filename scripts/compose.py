@@ -75,8 +75,13 @@ def _atomic_target(out_path):
     return out_path, temporary
 
 
-def concat(inputs, out_path):
-    """Concatenate clips. Re-encode each to a common format for reliable joining."""
+def concat(inputs, out_path, transition=None, transition_duration=0.4):
+    """Concatenate clips. Re-encode each to a common format for reliable joining.
+
+    transition=None (default): hard cut via concat demuxer (fastest).
+    transition="xfade": crossfade video + acrossfade audio at each boundary.
+    transition_duration: seconds for crossfade overlap (default 0.4s).
+    """
     _need_ffmpeg()
     out_path, temporary = _atomic_target(out_path)
     tmpdir = tempfile.mkdtemp(prefix="compose_")
@@ -101,12 +106,16 @@ def concat(inputs, out_path):
                     "-vsync", "cfr", "-r", "30", "-pix_fmt", "yuv420p", dst]
             _run(cmd)
             normed.append(dst)
-        listfile = os.path.join(tmpdir, "list.txt")
-        with open(listfile, "w") as f:
-            for n in normed:
-                f.write("file '%s'\n" % n)
-        _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", listfile,
-              "-c", "copy", temporary])
+
+        if transition == "xfade" and len(normed) > 1:
+            _concat_with_xfade(normed, temporary, transition_duration)
+        else:
+            listfile = os.path.join(tmpdir, "list.txt")
+            with open(listfile, "w") as f:
+                for n in normed:
+                    f.write("file '%s'\n" % n)
+            _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", listfile,
+                  "-c", "copy", temporary])
         if not _video_ok(temporary):
             raise SystemExit("ffmpeg concat did not produce valid video")
         os.replace(temporary, out_path)
@@ -116,6 +125,71 @@ def concat(inputs, out_path):
             os.remove(temporary)
         shutil.rmtree(os.path.dirname(temporary), ignore_errors=True)
     return out_path
+
+
+def _concat_with_xfade(normed, out_path, fade_dur=0.4):
+    """Concatenate clips with xfade (video crossfade) + acrossfade (audio).
+
+    Each boundary overlaps by fade_dur seconds. Total output duration =
+    sum(durations) - fade_dur * (n-1).
+    """
+    if len(normed) < 2:
+        shutil.copy2(normed[0], out_path)
+        return
+
+    # Probe each clip's duration
+    durations = []
+    for path in normed:
+        p = subprocess.run(
+            [_ffprobe_bin(), "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", path], stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True)
+        durations.append(float(p.stdout.strip()))
+
+    # Build filter_complex for chained xfade + acrossfade
+    # For N clips we need N-1 xfade and N-1 acrossfade filters.
+    inputs = []
+    for path in normed:
+        inputs.extend(["-i", path])
+
+    # Build video xfade chain: [0][1]xfade...[v01]; [v01][2]xfade...[v02]; ...
+    # Build audio acrossfade chain: [0:a][1:a]acrossfade...[a01]; ...
+    vfilters = []
+    afilters = []
+    for i in range(len(normed) - 1):
+        offset = durations[i] - fade_dur
+        if i == 0:
+            v_label = "[v%d]" % i
+            a_label = "[a%d]" % i
+            vfilters.append(
+                "[%d:v][%d:v]xfade=transition=fade:duration=%.3f:offset=%.3f%s"
+                % (i, i + 1, fade_dur, max(0, offset), v_label))
+            afilters.append(
+                "[%d:a][%d:a]acrossfade=d=%.3f:c1=tri:c2=tri%s"
+                % (i, i + 1, fade_dur, a_label))
+        else:
+            prev_v = "[v%d]" % (i - 1)
+            prev_a = "[a%d]" % (i - 1)
+            v_label = "[v%d]" % i
+            a_label = "[a%d]" % i
+            vfilters.append(
+                "%s[%d:v]xfade=transition=fade:duration=%.3f:offset=%.3f%s"
+                % (prev_v, i + 1, fade_dur, max(0, offset), v_label))
+            afilters.append(
+                "%s[%d:a]acrossfade=d=%.3f:c1=tri:c2=tri%s"
+                % (prev_a, i + 1, fade_dur, a_label))
+
+    last_v = "[v%d]" % (len(normed) - 2)
+    last_a = "[a%d]" % (len(normed) - 2)
+    fc = ";".join(vfilters + afilters)
+
+    cmd = (["ffmpeg", "-y"] + inputs +
+           ["-filter_complex", fc,
+            "-map", last_v, "-map", last_a,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+            "-c:a", "aac", "-ar", "48000", "-ac", "2",
+            "-pix_fmt", "yuv420p", out_path])
+    _run(cmd)
 
 
 _POS = {
@@ -184,6 +258,10 @@ def main(argv):
     pc = sub.add_parser("concat")
     pc.add_argument("--inputs", nargs="+", required=True)
     pc.add_argument("--out", required=True)
+    pc.add_argument("--transition", default="cut", choices=["cut", "xfade"],
+                    help="镜头间过渡方式：cut=硬切（默认），xfade=交叉淡化")
+    pc.add_argument("--transition-duration", type=float, default=0.4,
+                    help="交叉淡化时长（秒），默认 0.4")
 
     pl = sub.add_parser("logo")
     pl.add_argument("--input", required=True)
@@ -195,7 +273,9 @@ def main(argv):
 
     args = p.parse_args(argv)
     if args.cmd == "concat":
-        out = concat(args.inputs, args.out)
+        out = concat(args.inputs, args.out,
+                     transition=args.transition if args.transition != "cut" else None,
+                     transition_duration=args.transition_duration)
         print(json.dumps({"ok": True, "out": out}))
     elif args.cmd == "logo":
         out = overlay_logo(args.input, args.logo, args.out,

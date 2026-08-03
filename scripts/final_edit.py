@@ -40,30 +40,77 @@ import media_qc  # noqa: E402
 import run_manifest as rm  # noqa: E402
 import script_splitter  # noqa: E402
 
-# 逆向方案的 camera_move 自由文本 → Remotion Move 枚举。中英关键词都覆盖。
-_MOVE_MAP = [
-    (r"推|push|zoom.?in|近", "push_in"),
-    (r"拉|pull|zoom.?out|远", "pull_out"),
-    (r"左摇|左移|pan.?left|左", "pan_left"),
-    (r"右摇|右移|pan.?right|右", "pan_right"),
-    (r"上摇|上移|tilt.?up|仰", "tilt_up"),
-    (r"下摇|下移|tilt.?down|俯", "tilt_down"),
-    (r"固定|静止|still|fixed|不动", "still"),
-    (r"缓|ken.?burns|漂移", "ken_burns"),
-]
+# 逆向方案的 camera_move 自由文本 → Remotion Move 枚举。
+# 白名单精确匹配：先做全字符串精确匹配，再做词级匹配（避免"推"误命中"推荐"）。
+_MOVE_EXACT = {
+    "推": "push_in", "推进": "push_in", "推近": "push_in",
+    "push": "push_in", "push_in": "push_in", "push in": "push_in",
+    "zoom_in": "push_in", "zoom in": "push_in", "zoomin": "push_in",
+    "拉": "pull_out", "拉远": "pull_out", "拉出": "pull_out",
+    "pull": "pull_out", "pull_out": "pull_out", "pull out": "pull_out",
+    "zoom_out": "pull_out", "zoom out": "pull_out", "zoomout": "pull_out",
+    "左摇": "pan_left", "左移": "pan_left", "左移镜头": "pan_left",
+    "pan_left": "pan_left", "pan left": "pan_left", "panleft": "pan_left",
+    "右摇": "pan_right", "右移": "pan_right", "右移镜头": "pan_right",
+    "pan_right": "pan_right", "pan right": "pan_right", "panright": "pan_right",
+    "上摇": "tilt_up", "上移": "tilt_up", "仰拍": "tilt_up",
+    "tilt_up": "tilt_up", "tilt up": "tilt_up", "tiltup": "tilt_up",
+    "下摇": "tilt_down", "下移": "tilt_down", "俯拍": "tilt_down",
+    "tilt_down": "tilt_down", "tilt down": "tilt_down", "tiltdown": "tilt_down",
+    "固定": "still", "静止": "still", "固定机位": "still", "不动": "still",
+    "still": "still", "fixed": "still", "static": "still",
+    "缓慢": "ken_burns", "漂移": "ken_burns", "缓慢移动": "ken_burns",
+    "ken_burns": "ken_burns", "ken burns": "ken_burns", "kenburns": "ken_burns",
+}
 
-_TRANSITION_MAP = [
-    (r"淡|fade|溶", "fade"),
-    (r"滑|slide|推", "slide"),
-    (r"硬切|cut|直切|切", "cut"),
-]
+# 词级匹配：把文本按空格/标点分词后逐词查表
+_MOVE_WORDS = {}
+for key, val in _MOVE_EXACT.items():
+    for word in key.replace("_", " ").split():
+        _MOVE_WORDS[word.lower()] = val
+
+_TRANSITION_EXACT = {
+    "淡": "fade", "淡入": "fade", "淡出": "fade", "淡化": "fade",
+    "fade": "fade", "fade_in": "fade", "fade in": "fade",
+    "fade_out": "fade", "fade out": "fade", "dissolve": "fade",
+    "溶": "fade", "溶接": "fade",
+    "滑": "slide", "滑动": "slide", "滑入": "slide", "滑出": "slide",
+    "slide": "slide", "slide_in": "slide", "slide in": "slide",
+    "slide_out": "slide", "slide out": "slide", "wipe": "slide",
+    "硬切": "cut", "直切": "cut", "切": "cut", "切换": "cut",
+    "cut": "cut", "hard_cut": "cut", "hard cut": "cut", "jump_cut": "cut",
+}
+
+_TRANSITION_WORDS = {}
+for key, val in _TRANSITION_EXACT.items():
+    for word in key.replace("_", " ").split():
+        _TRANSITION_WORDS[word.lower()] = val
 
 
 def _map_move(text):
     if not text:
         return "still"
-    for pat, mv in _MOVE_MAP:
-        if re.search(pat, text, re.IGNORECASE):
+    s = str(text).strip().lower()
+    # 1. 全字符串精确匹配
+    if s in _MOVE_EXACT:
+        return _MOVE_EXACT[s]
+    # 2. 词级匹配
+    for word in re.split(r"[\s,，、；;]+", s):
+        if word in _MOVE_WORDS:
+            return _MOVE_WORDS[word]
+    # 3. 中文复合词子串匹配（避免"推"误命中"推荐"，使用更长的不歧义子串）
+    _COMPOUND = [
+        ("推近", "push_in"), ("推进", "push_in"), ("缓慢推", "push_in"),
+        ("拉近", "pull_out"), ("拉远", "pull_out"),
+        ("左摇", "pan_left"), ("向左", "pan_left"), ("横摇向左", "pan_left"),
+        ("右摇", "pan_right"), ("向右", "pan_right"), ("横摇向右", "pan_right"),
+        ("上摇", "tilt_up"), ("向上", "tilt_up"),
+        ("下摇", "tilt_down"), ("向下", "tilt_down"),
+        ("固定", "still"), ("静止", "still"),
+        ("漂移", "ken_burns"), ("缓慢移", "ken_burns"),
+    ]
+    for substr, mv in _COMPOUND:
+        if substr in s:
             return mv
     return "still"
 
@@ -71,8 +118,20 @@ def _map_move(text):
 def _map_transition(text):
     if not text:
         return "cut"
-    for pat, tr in _TRANSITION_MAP:
-        if re.search(pat, text, re.IGNORECASE):
+    s = str(text).strip().lower()
+    if s in _TRANSITION_EXACT:
+        return _TRANSITION_EXACT[s]
+    for word in re.split(r"[\s,，、；;]+", s):
+        if word in _TRANSITION_WORDS:
+            return _TRANSITION_WORDS[word]
+    # 中文复合词子串匹配
+    _COMPOUND = [
+        ("淡入", "fade"), ("淡出", "fade"), ("淡化", "fade"),
+        ("滑入", "slide"), ("滑出", "slide"),
+        ("硬切", "cut"), ("直切", "cut"),
+    ]
+    for substr, tr in _COMPOUND:
+        if substr in s:
             return tr
     return "cut"
 
@@ -275,7 +334,15 @@ def _probe_duration(video_path, *, required=False):
 
 
 def _validate_timeline(shots, basecut_duration=None):
-    """Validate source ranges before converting seconds to frames."""
+    """Validate source ranges before converting seconds to frames.
+
+    Checks:
+      1. Each shot has valid numeric start_sec < end_sec.
+      2. No shot exceeds basecut duration.
+      3. EDL continuity: adjacent shots must not overlap; gaps > 0.5s
+         trigger a warning (not an error, to allow intentional black frames).
+    """
+    prev_end = None
     for i, shot in enumerate(shots):
         try:
             start = float(shot.get("start_sec"))
@@ -288,6 +355,17 @@ def _validate_timeline(shots, basecut_duration=None):
             raise ValueError(
                 "SHOT_EXCEEDS_BASECUT: shot %d ends at %.3fs, basecut is %.3fs" %
                 (i + 1, end, basecut_duration))
+        # EDL continuity check
+        if prev_end is not None:
+            if start < prev_end - 0.001:
+                raise ValueError(
+                    "EDL_OVERLAP: shot %d starts at %.3fs but shot %d ends at %.3fs" %
+                    (i + 1, start, i, prev_end))
+            gap = start - prev_end
+            if gap > 0.5:
+                print("[edl-check] WARNING: shot %d 与 shot %d 之间有 %.3fs 空隙"
+                      % (i, i + 1, gap), flush=True)
+        prev_end = end
 
 
 def compile_shotlist(scheme, basecut_path, *, require_basecut_duration=False):

@@ -4,6 +4,24 @@ from copy import deepcopy
 
 SEEDANCE_MAX_SECONDS = 15
 
+# Per-model maximum generation duration (seconds).
+# Used when the target model is known; falls back to SEEDANCE_MAX_SECONDS.
+MODEL_MAX_SECONDS = {
+    "seedance-2.0": 15,
+    "seedance-2.0-fast": 15,
+    "seedance-2.0-white": 15,
+    "kling-v3-omni-video": 10,
+    "kling-v3-omni": 10,
+    "wan2.7-i2v": 5,
+}
+
+
+def max_seconds_for_model(model=None):
+    """Return the max generation duration for the given model."""
+    if model:
+        return MODEL_MAX_SECONDS.get(str(model).lower(), SEEDANCE_MAX_SECONDS)
+    return SEEDANCE_MAX_SECONDS
+
 
 def _duration(shot, minimum=1):
     value = shot.get("duration") or shot.get("seconds") or minimum

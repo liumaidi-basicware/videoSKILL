@@ -25,3 +25,5 @@ offline-assets/
 
 # WorkBuddy 内部记忆（项目级会话数据）
 .workbuddy/
+unittest_client_*/
+_tmp_test_*
