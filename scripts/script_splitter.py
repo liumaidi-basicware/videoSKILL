@@ -348,6 +348,31 @@ def _shot_duration_seconds(shot, min_seconds, speech_rate=None):
     return max(min_seconds, int(round(est)))
 
 
+def _validate_dialogue_fit(shot, duration, speech_rate=None):
+    """Check if dialogue fits within the allocated duration.
+
+    Returns (fits, expected_seconds, message). When dialogue is too long,
+    the model will either rush the speech (causing lip-sync issues) or
+    truncate the dialogue (causing missing content).
+    """
+    dialogue = shot.get("dialogue") or shot.get("voiceover") or ""
+    if not dialogue:
+        return True, 0, None
+    rate = speech_rate or _speech_rate_for_shot(shot)
+    chars = len(re.sub(r"\s", "", dialogue))
+    expected = chars / rate
+    # Allow 10% tolerance — model can slightly adjust pacing
+    fits = expected <= duration * 1.10
+    if not fits:
+        return False, round(expected, 1), (
+            "台词时长(%.1fs)超出镜头分配时长(%ds)的10%%容差。"
+            "预计需要%.1fs但只分配了%ds，模型会被迫加速念词导致嘴形配音不同步。"
+            "建议：①缩减台词至%d字以内 ②增加该镜头时长至%ds ③拆分为两个镜头"
+            % (expected, duration, expected, duration,
+               int(duration * rate * 0.95), int(expected) + 1))
+    return True, round(expected, 1), None
+
+
 def _check_scene_consistency(shots):
     """Warn when shots sharing a scene_id have divergent scene_prompt descriptions.
 
@@ -372,6 +397,49 @@ def _check_scene_consistency(shots):
                 print("[scene-check] WARNING: scene_id=%s 的 shots %s 和 %s "
                       "scene_prompt 差异很大（相似度 %.0f%%），请确认是否为同一场景"
                       % (sid, base_id, other_id, ratio * 100), flush=True)
+
+
+def _extract_clothing_lock(plan, shot):
+    """Extract clothing description from character metadata for identity lock.
+
+    Sources (in priority order):
+      1. shot.character.clothing / shot.clothing
+      2. plan.characters[].clothing (matched by shot.characters[0])
+      3. plan.cast_description / plan.character_description
+    Returns a clothing description string, or None if not available.
+    """
+    # Shot-level clothing
+    char = shot.get("character") or {}
+    if isinstance(char, dict) and char.get("clothing"):
+        return str(char["clothing"]).strip()
+    if shot.get("clothing"):
+        return str(shot["clothing"]).strip()
+
+    # Plan-level characters
+    shot_chars = shot.get("characters") or []
+    plan_chars = plan.get("characters") or []
+    if shot_chars and plan_chars:
+        # Match by character name/id
+        target = str(shot_chars[0]).strip().lower()
+        for pc in plan_chars:
+            if not isinstance(pc, dict):
+                continue
+            pc_name = str(pc.get("name") or pc.get("id") or "").strip().lower()
+            if pc_name == target or pc_name in target or target in pc_name:
+                clothing = pc.get("clothing") or pc.get("outfit") or pc.get("costume")
+                if clothing:
+                    return str(clothing).strip()
+
+    # Fallback: plan-level description
+    for key in ("cast_description", "character_description", "actor_description"):
+        desc = plan.get(key)
+        if desc and isinstance(desc, str):
+            # Try to extract clothing from description
+            import re as _re
+            m = _re.search(r"穿[着戴]?([^，。；;]+)", desc)
+            if m:
+                return m.group(1).strip()
+    return None
 
 
 def _inject_scene_transitions(shots):
@@ -633,6 +701,11 @@ def split(plan, storyboard_dir=None, fps=30, min_seconds=3, bw_storyboard=None,
         secs = _shot_duration_seconds(shot, min_seconds)
         total_seconds += secs
 
+        # 台词时长 vs 镜头时长校验：防止模型被迫加速念词导致音画不同步
+        dlg_fits, dlg_expected, dlg_msg = _validate_dialogue_fit(shot, secs)
+        if not dlg_fits:
+            print("[dialogue-fit] WARNING: shot %s — %s" % (sid, dlg_msg), flush=True)
+
         # 台词 + 表演指导 + 镜头语言，拼成音画一体出片 text
         parts = []
         if shot.get("dialogue") or shot.get("voiceover"):
@@ -657,6 +730,9 @@ def split(plan, storyboard_dir=None, fps=30, min_seconds=3, bw_storyboard=None,
 
         style = plan.get("visual_style") or (plan.get("render_profile") or {}).get("video_style_prompt", "")
         contract = _build_clip_contract(plan, shot, references, ratio, style, secs)
+        # 服装锁定：从人物描述/角色板元数据提取服装细节
+        clothing_lock = _extract_clothing_lock(plan, shot)
+
         dialogue = (shot.get("dialogue") or shot.get("voiceover") or "").strip()
         segment = {
             "id": sid,
@@ -688,6 +764,8 @@ def split(plan, storyboard_dir=None, fps=30, min_seconds=3, bw_storyboard=None,
             "seedance_native": True,
             "extend_from_previous": bool(oral_broadcast and
                                           (shot.get("extend_from_previous") or shot.get("extend"))),
+            "clothing_lock": clothing_lock,
+            "character_identity_lock": bool(has_human),
             # Keep authored graphics out of the video prompt, but carry them
             # forward for the post-production HyperFrames stage.
             "motion_elements": list(shot.get("motion_elements") or [])
@@ -879,7 +957,9 @@ def assemble(segments_spec, results, out_path, ff=None, allow_ocr_warning=False,
         return {"ok": True, "out": out_path, "segment_count": 1, "used_paths": paths}
 
     import compose
-    compose.concat(paths, out_path)
+    # 默认启用交叉淡化，减少段间断层感；短片段(<=2段)或用户显式关闭时退化为硬切
+    use_xfade = len(paths) > 2
+    compose.concat(paths, out_path, transition="xfade" if use_xfade else None)
     return {"ok": True, "out": out_path, "segment_count": len(paths), "used_paths": paths}
 
 

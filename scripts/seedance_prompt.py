@@ -71,8 +71,14 @@ def compile_prompt(segment, refs=None, *, style=None, negative=None, target_mode
         % (target, _clean(duration), _clean(segment.get("ratio") or "")),
         "成片媒介与风格：真实摄影、写实商业广告视频；故事板只是黑白素描预演，用于构图和动作顺序参考。绝不输出素描、铅笔画、炭笔画、黑白绘画、插画、动漫或故事板格子画面。",
         "导演标注颜色系统仅供读取，不得画入成片：红色箭头=身体运动；蓝色箭头=摄像机运动；绿色标记=取景/构图笔记；橙色标记=灯光方向；紫色标记=声音/情感强调；黑色文本=简短镜头笔记和面板标签。请把这些标注转译为真实动作、机位、构图、灯光、声音和情绪，不要显示任何箭头、彩色线条、标记、黑色文字或面板标签。",
-        "一致性锁定：人物脸部、发型、服装和体态保持完全一致；产品外观、颜色、材质、比例、结构和标识细节保持完全一致；场景光线和空间关系保持连续。",
     ]
+    # ── 连续性锁定（修复断层 + 服装漂移 + 音画不同步）──
+    continuity_lines = _build_continuity_lock(segment)
+    if continuity_lines:
+        lines.extend(continuity_lines)
+    else:
+        lines.append(
+            "一致性锁定：人物脸部、发型、服装和体态保持完全一致；产品外观、颜色、材质、比例、结构和标识细节保持完全一致；场景光线和空间关系保持连续。")
     for item in timeline:
         action = _clean(item.get("action") or item.get("visual") or item.get("text") or "主体自然运动")
         line = "%s-%s秒：%s。镜头%s。" % (
@@ -152,6 +158,60 @@ def compile_prompt(segment, refs=None, *, style=None, negative=None, target_mode
     if negative:
         lines.append("避免：%s。" % _clean(negative))
     return "\n".join(lines)
+
+
+def _build_continuity_lock(segment):
+    """Build enhanced continuity lock lines based on segment context.
+
+    Addresses three production quality issues:
+      1. Segment discontinuity (断层) — tail-frame chaining + visual state lock
+      2. Clothing inconsistency (服装漂移) — explicit clothing description lock
+      3. Voice/lip-sync drift (音画不同步) — voice pacing + duration constraint
+    """
+    lines = []
+
+    # ── 服装锁定（修复人物服装不一致）──
+    clothing = segment.get("clothing_lock") or segment.get("clothing_description")
+    if clothing:
+        lines.append(
+            "服装严格锁定（最高优先级）：%s。不允许更换、添加、删除或改变任何服装元素；"
+            "不允许改变颜色、材质、纹理、图案或配饰。每一帧的服装都必须与参考图完全一致。"
+            % _clean(clothing))
+    elif segment.get("character_identity_lock"):
+        lines.append(
+            "服装严格锁定：人物必须穿着与参考图完全相同的服装、配饰和鞋子；"
+            "不允许更换颜色、款式、材质或添加/删除任何服装元素。")
+
+    # ── 尾帧串联连续性（修复片段衔接断层）──
+    if segment.get("_chain_tail_frame") or segment.get("extend_video"):
+        lines.append(
+            "段间连续性锁定（关键）：本段从上一段的最后一帧无缝继续。第一帧必须与参考图"
+            "（上一段尾帧）在人物位置、姿势、表情、服装、场景、光线、色调、镜头角度上完全一致。"
+            "不允许跳变、重置场景、改变人物位置或改变光线方向。")
+        if segment.get("continuity_in"):
+            lines.append(
+                "上一段结束状态：%s。本段必须从这个精确状态自然延续。" % _clean(segment["continuity_in"]))
+
+    # ── 口播音画同步锁定（修复音画不同步 + 长口播嘴形配音不一致）──
+    audio = segment.get("audio_contract") or {}
+    dialogue = audio.get("dialogue") or segment.get("dialogue") or ""
+    duration = segment.get("duration") or 5
+    if dialogue and segment.get("oral_broadcast"):
+        lines.append(
+            "口播音画同步锁定：台词必须在 %s 秒内以自然语速念完；不允许加速或减速。"
+            "嘴唇动作必须与发音精确同步，从第一个字到最后一个字。不允许提前闭嘴或延迟开口。"
+            "配音音色、音调、语速、情感必须与上一段完全一致，如同同一个人连续说话。"
+            % _clean(duration))
+        if segment.get("extend_video"):
+            lines.append(
+                "音频连续性：这是上一段口播的自然延续。声音特质（音色、音调、语速、口音、情感）"
+                "必须与上一段完全一致，听众不应察觉到段落切换。第一句话紧接上一段最后一句的语气。")
+    elif dialogue:
+        lines.append(
+            "音画同步：台词必须在 %s 秒内以自然语速念完，嘴唇动作与发音精确同步。"
+            % _clean(duration))
+
+    return lines
 
 
 def audit_segments(segments):

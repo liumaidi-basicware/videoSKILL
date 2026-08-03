@@ -1076,6 +1076,7 @@ def render_chained(segments, model=None, verbose=True,
                             "formal flow will not truncate confirmed refs." %
                             (seg.get("id") or "unknown", len(ref_urls)))
                     vtype = 5 if len(ref_urls) > 1 else 4
+                    seg["_chain_tail_frame"] = True  # 标记尾帧串联段
                     log("[chain %d] 尾帧串联 + 锁定参考图合并注入" % (i + 1))
                 else:
                     vtype = seg.get("video_type", 4 if len(ref_urls) == 1 else 5)
@@ -1087,6 +1088,8 @@ def render_chained(segments, model=None, verbose=True,
                 if not ref_urls:
                     vtype = seg.get("video_type", 1)  # 尾帧没拿到→降级独立生成
                     log("[chain %d] 无上段尾帧，降级独立生成" % (i + 1))
+                else:
+                    seg["_chain_tail_frame"] = True  # 标记尾帧串联段（prompt 强化连续性）
             # vtype 定了再按能力选模型（type4 参考图段自动回落 kling）
             pick_args = {"video_type": vtype}
             if not draft:
