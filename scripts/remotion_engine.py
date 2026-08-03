@@ -431,13 +431,16 @@ def render(shotlist_path, out_path, quality="high", composition=COMPOSITION):
     finally:
         try:
             os.remove(props_path)
-        except OSError:
+        except BaseException:
             pass
         try:
             os.unlink(render_path)
-        except OSError:
+        except BaseException:
             pass
-        shutil.rmtree(stage_dir, ignore_errors=True)
+        try:
+            shutil.rmtree(stage_dir, ignore_errors=True)
+        except BaseException:
+            pass
     print(json.dumps({"ok": True, "out": out_path}, ensure_ascii=False))
     return out_path
 

@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
 import br_client  # noqa: E402
 import video_engine as ve  # noqa: E402
+import video_models  # noqa: E402
 
 
 PRIVACY_MESSAGE = "上传的参考图检测到真实人物，因隐私保护不支持生成"
@@ -42,6 +43,7 @@ class VideoPrivacyFallbackTests(unittest.TestCase):
         ])
         with mock.patch.object(ve.key_setup, "load_key", return_value="sk-test"), \
              mock.patch.object(ve, "_model_catalog", return_value=catalog), \
+             mock.patch.object(video_models, "_model_catalog", return_value=catalog), \
              mock.patch.object(ve.br_client, "to_image_ref", side_effect=lambda value, **_: value), \
              mock.patch.object(ve.br_client, "create_video", side_effect=create), \
              mock.patch.object(ve.br_client, "wait_video", side_effect=waits):
