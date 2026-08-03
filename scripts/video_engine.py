@@ -41,6 +41,14 @@ import take_review           # noqa: E402
 import media_qc              # noqa: E402
 import run_manifest as _rm   # noqa: E402 — hoisted from 12 inline imports (v3 cleanup)
 import cost_ledger          # noqa: E402 — v3 cost tracking in _persist_task
+from video_models import (   # noqa: E402 — v4 shim: identical functions extracted
+    _available_models_set, _catalog_bool, _catalog_list, _catalog_submission_names,
+    _integrated_audio_value, _is_kling_video_model, _model_catalog,
+    _pick_image_model, _resolve_catalog_model,
+)
+from video_tasks import (     # noqa: E402 — v4 shim: identical functions extracted
+    _completed_task, _submission_request_id,
+)
 
 
 def _manifest_handoff_matches(manifest, segments):
@@ -360,53 +368,10 @@ IMAGE_MODEL_FALLBACK = [
 ]
 
 
-def _catalog_bool(value):
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)) and value in (0, 1):
-        return bool(value)
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "on", "online", "active", "enabled", "available"}:
-            return True
-        if normalized in {"0", "false", "no", "off", "offline", "inactive", "disabled", "unavailable"}:
-            return False
-    return None
 
 
-def _catalog_list(value, *, integers=False):
-    if isinstance(value, str):
-        try:
-            value = json.loads(value.strip())
-        except (TypeError, ValueError):
-            value = [part.strip() for part in value.split(",") if part.strip()]
-    if isinstance(value, dict):
-        value = [key for key, enabled in value.items() if _catalog_bool(enabled) is not False]
-    if not isinstance(value, (list, tuple, set)):
-        value = [value] if value not in (None, "") else []
-    output = []
-    for item in value:
-        try:
-            normalized = int(item) if integers else str(item).strip()
-        except (TypeError, ValueError):
-            continue
-        if normalized not in output and normalized != "":
-            output.append(normalized)
-    return output
 
 
-def _integrated_audio_value(record):
-    capabilities = record.get("capabilities") if isinstance(record.get("capabilities"), dict) else {}
-    audio = capabilities.get("audio") if isinstance(capabilities.get("audio"), dict) else {}
-    for source, key in (
-            (record, "integratedAudio"), (record, "integrated_audio"),
-            (record, "supportsIntegratedAudio"), (record, "audioIntegrated"),
-            (record, "supportsAudio"), (record, "audioSupport"),
-            (record, "audio"), (record, "allowAudio"),
-            (capabilities, "integratedAudio"), (audio, "integrated")):
-        if key in source:
-            return _catalog_bool(source.get(key))
-    return None
 
 
 def _normalize_model_catalog(models):
@@ -457,42 +422,14 @@ def _normalize_model_catalog(models):
     return {"records": records, "aliases": alias_index}
 
 
-def _catalog_submission_names(raw):
-    """Return only names explicitly advertised by the provider catalog."""
-    names = set()
-    for key in ("modelId", "id", "modelName", "name", "displayName"):
-        value = raw.get(key)
-        if value:
-            names.add(str(value).strip())
-    for key in ("alias", "aliases"):
-        names.update(_catalog_list(raw.get(key)))
-    return {name for name in names if name}
 
 
-def _model_catalog(category="video"):
-    try:
-        return _normalize_model_catalog(br_client.list_models(category=category))
-    except Exception:
-        return {"records": {}, "aliases": {}}
 
 
-def _resolve_catalog_model(value, catalog):
-    matches = catalog.get("aliases", {}).get(str(value or "").strip().lower(), set())
-    if len(matches) > 1:
-        raise ValueError("AMBIGUOUS_MODEL_ALIAS: %s -> %s" % (value, ", ".join(sorted(matches))))
-    return next(iter(matches)) if matches else None
 
 
-def _is_kling_video_model(model):
-    if "kling-v3-omni" in str(model or "").lower():
-        return True
-    record = _model_catalog("video").get("records", {}).get(model) or {}
-    return any("kling-v3-omni" in alias.lower() for alias in record.get("aliases", set()))
 
 
-def _available_models_set(category="video"):
-    catalog = _model_catalog(category)
-    return {model_id for model_id, record in catalog["records"].items() if record["active"]}
 
 
 def _model_allow_types(category="video"):
@@ -578,16 +515,6 @@ def _pick_video_model(preferred=None, video_type=None, dialogue=None, formal=Fal
                      (video_type, bool(formal and dialogue)))
 
 
-def _pick_image_model(preferred=None):
-    candidates = ([preferred] if preferred else []) + [
-        m for m in IMAGE_MODEL_FALLBACK if m != preferred]
-    avail = _available_models_set("image")
-    if not avail:
-        return candidates[0]
-    for m in candidates:
-        if m in avail:
-            return m
-    return candidates[0]
 
 
 # 注：视频出片不做两遍清洗（首帧图生只会重生成、不保证一致，已移除）。
@@ -758,16 +685,6 @@ def _submit_video(api_key, segment, model, video_type, ref_urls, negative_prompt
     return task_id, text
 
 
-def _submission_request_id(segment, model, video_type, handoff_fingerprint,
-                           attempt=1, dependency_fingerprint=None):
-    """Deterministic paid-request identity, stable across process restarts."""
-    payload = {
-        "stage": "video", "unit_id": segment.get("id"),
-        "handoff_fingerprint": handoff_fingerprint, "model": model,
-        "video_type": int(video_type or 1), "attempt": int(attempt),
-        "dependency_fingerprint": dependency_fingerprint,
-    }
-    return "video-" + artifact_contract.sha256_json(payload)
 
 
 def _persist_submission_intent(manifest, manifest_path, ledger_path, segment,
@@ -799,16 +716,6 @@ def _current_attempt(manifest, segment_id):
     return _rm.current_video_attempt(manifest, segment_id)
 
 
-def _completed_task(manifest, segment_id, handoff_fingerprint):
-    """Reuse success only inside the currently authorized attempt."""
-    if manifest is None:
-        return None
-    attempt = _current_attempt(manifest, segment_id)
-    return next((item for item in reversed(manifest.get("tasks", []))
-                 if item.get("stage") == "video" and item.get("unit_id") == segment_id
-                 and item.get("handoff_fingerprint") == handoff_fingerprint
-                 and int(item.get("attempt", 1)) == attempt
-                  and item.get("status") == "succeeded" and item.get("task_id")), None)
 
 
 def _task_video_url(api_key, task):
