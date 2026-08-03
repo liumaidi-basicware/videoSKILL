@@ -20,7 +20,7 @@ from agent_runtime import detect_agent_runtime
 
 STAGES = (
     "brief", "script", "product_board", "cast_board", "product_usage", "storyboard", "render_plan",
-    "video", "captions", "final",
+    "video", "captions", "final", "derive",
 )
 
 
@@ -41,6 +41,7 @@ BASE_DEPENDENCIES = {
     "video": ("storyboard", "render_plan"),
     "captions": ("video",),
     "final": ("captions",),
+    "derive": ("final",),
 }
 
 

@@ -12,6 +12,7 @@ sys.path.insert(0, HERE)
 import script_splitter  # noqa: E402
 import take_review  # noqa: E402
 import cost_ledger  # noqa: E402 — v3 cost tracking
+import derive_ratio  # noqa: E402 — v4 derive stage
 
 import run_manifest as rm
 
@@ -112,6 +113,24 @@ def pipeline_status(manifest):
         except (ValueError, OSError, KeyError) as exc:
             action = "repair_delivery_evidence"
             message = "阶段审批已完成，但交付证据仍不完整：%s。请先补齐 reviews、take、OCR 或 formal QC。" % exc
+    elif current == "derive":
+        # Derive stage: show derived ratio previews if available
+        derive_artifacts = (manifest.get("generation") or {}).get("derive") or {}
+        derive_outputs = derive_artifacts.get("outputs") or []
+        if derive_outputs:
+            previews = [os.path.abspath(p) for p in derive_outputs
+                       if p and os.path.exists(p)] + previews
+            previews = list(dict.fromkeys(previews))
+        derive_status = derive_artifacts.get("status")
+        if derive_status == "pending_approval":
+            action = "approve_derive"
+            message = "多比例派生已完成，请查看各比例版本并确认。"
+        elif derive_status == "skipped":
+            action = "approve_derive"
+            message = "多比例派生已跳过（仅需原始比例），请直接确认。"
+        else:
+            action = "start_derive"
+            message = "成片已确认，可进入多比例派生阶段（零模型成本，纯 ffmpeg 重排）。"
     elif pending:
         action = "approve_%s" % current
         message = "请查看预览并确认%s阶段；文件变化后本次确认会自动失效。" % current
@@ -133,6 +152,11 @@ def _delivery_snapshot(manifest):
     rm.identity_gate(manifest)
     if not rm.approval_is_current(manifest, "final"):
         raise ValueError("DELIVERY_FINAL_APPROVAL_REQUIRED_OR_STALE")
+    # Derive stage: only check if not skipped
+    derive_gen = (manifest.get("generation") or {}).get("derive") or {}
+    if derive_gen.get("status") not in (None, "skipped"):
+        if not rm.approval_is_current(manifest, "derive"):
+            raise ValueError("DELIVERY_DERIVE_APPROVAL_REQUIRED_OR_STALE")
     if not rm.approval_is_current(manifest, "video"):
         raise ValueError("DELIVERY_VIDEO_APPROVAL_REQUIRED_OR_STALE")
     if not rm.approval_is_current(manifest, "captions"):
@@ -254,6 +278,59 @@ def verify_delivery(manifest, path):
     return {"ok": True, "delivery": os.path.abspath(path), "delivery_identity": identity}
 
 
+def derive_and_record(manifest, manifest_path, source_path, target_ratios, out_dir):
+    """Run multi-ratio derivation and record results in the manifest.
+
+    This is the pipeline entry point for the "derive" stage. It calls
+    derive_ratio.derive_batch (pure ffmpeg, zero model cost) and records
+    the derived video artifacts with their sha256 fingerprints.
+
+    Args:
+        manifest: the run manifest dict
+        manifest_path: path to manifest file (for atomic save)
+        source_path: path to the approved final video
+        target_ratios: list of ratio strings, e.g. ["16:9", "1:1"]
+        out_dir: output directory for derived videos
+
+    Returns:
+        The updated manifest's derive generation record.
+    """
+    if not rm.approval_is_current(manifest, "final"):
+        raise ValueError("DERIVE_REQUIRES_FINAL_APPROVAL")
+
+    if not target_ratios:
+        # Skip derive stage — mark as skipped
+        gen = manifest.setdefault("generation", {})
+        gen["derive"] = {
+            "status": "skipped",
+            "outputs": [],
+            "started_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        rm.save_manifest(manifest, manifest_path)
+        return gen["derive"]
+
+    result = derive_ratio.derive_batch(source_path, target_ratios, out_dir)
+
+    # Record derived artifacts with fingerprints
+    derived_files = []
+    for item in result.get("derived", []):
+        path = item.get("path", "")
+        if path and os.path.isfile(path):
+            derived_files.append(path)
+
+    gen = manifest.setdefault("generation", {})
+    gen["derive"] = {
+        "status": "pending_approval",
+        "outputs": derived_files,
+        "source": source_path,
+        "source_ratio": result.get("source_ratio"),
+        "derived_details": result.get("derived", []),
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    rm.save_manifest(manifest, manifest_path)
+    return gen["derive"]
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="正式制作审批、状态与交付编排")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -269,6 +346,13 @@ def main(argv=None):
         command = delivery_sub.add_parser(name)
         command.add_argument("--manifest", required=True)
         command.add_argument("--out" if name == "create" else "--delivery", required=True)
+    derive = sub.add_parser("derive", help="多比例派生（纯 ffmpeg，零模型成本）")
+    derive.add_argument("--manifest", required=True)
+    derive.add_argument("--source", required=True, help="已确认的最终成片路径")
+    derive.add_argument("--ratios", nargs="+", default=["16:9", "1:1"],
+                       choices=list(derive_ratio.RATIO_DIMS.keys()),
+                       help="目标比例列表")
+    derive.add_argument("--out-dir", required=True, help="输出目录")
     args = parser.parse_args(argv)
     manifest_path = args.manifest
     try:
@@ -282,6 +366,10 @@ def main(argv=None):
     elif args.command == "approve":
         approve_stage(manifest, manifest_path, args.stage,
                       storyboard_result=args.storyboard_result)
+        result = pipeline_status(manifest)
+    elif args.command == "derive":
+        result = derive_and_record(manifest, manifest_path, args.source,
+                                   args.ratios, args.out_dir)
         result = pipeline_status(manifest)
     elif args.delivery_command == "create":
         result = create_delivery(manifest, args.out)
