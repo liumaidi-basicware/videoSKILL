@@ -51,7 +51,8 @@ CJK_LOCALS = ('local("PingFang SC"), local("PingFang HK"), '
               'local("Noto Sans CJK SC"), local("Source Han Sans SC"), '
               'local("WenQuanYi Zen Hei")')
 HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?$")
-ALLOWED_PRESETS = {"fade_up", "slide_left", "slide_right", "pop", "typewriter", "fade"}
+ALLOWED_PRESETS = {"fade_up", "slide_left", "slide_right", "pop", "typewriter", "fade",
+                    "rise", "drop", "zoom_in", "bounce", "glow", "slide_up", "slide_down"}
 ALLOWED_POSITIONS = {"center", "upper", "lower"}
 
 
@@ -203,12 +204,23 @@ def _scene_position_css(sc, W, H, size):
 def _gsap_from(preset):
     """预设 → GSAP from() 参数（入场动效，缓动是商业级手感的关键）。"""
     table = {
-        "fade_up":     '{ opacity:0, y:70, duration:0.6, ease:"power3.out" }',
-        "slide_left":  '{ opacity:0, x:-160, duration:0.6, ease:"power3.out" }',
-        "slide_right": '{ opacity:0, x:160, duration:0.6, ease:"power3.out" }',
-        "pop":         '{ opacity:0, scale:0.6, duration:0.5, ease:"back.out(1.7)" }',
-        "fade":        '{ opacity:0, duration:0.5, ease:"power2.out" }',
+        "fade_up":     '{ opacity:0, y:70, duration:0.7, ease:"power3.out" }',
+        "slide_left":  '{ opacity:0, x:-160, duration:0.7, ease:"power3.out" }',
+        "slide_right": '{ opacity:0, x:160, duration:0.7, ease:"power3.out" }',
+        "pop":         '{ opacity:0, scale:0.5, duration:0.6, ease:"back.out(2.0)" }',
+        "fade":        '{ opacity:0, duration:0.6, ease:"power2.out" }',
         "typewriter":  '{ opacity:0, duration:0.3, ease:"none" }',
+        # 新增预设
+        "rise":        '{ opacity:0, y:100, scale:0.9, duration:0.8, ease:"power4.out" }',
+        "drop":        '{ opacity:0, y:-80, scale:0.95, duration:0.7, ease:"power3.out" }',
+        "zoom_in":     '{ opacity:0, scale:0.3, duration:0.6, ease:"back.out(1.5)" }',
+        "bounce":      '{ opacity:0, scale:0.4, y:60, duration:0.8, ease:"elastic.out(1, 0.5)" }',
+        "glow":        '{ opacity:0, scale:0.8, duration:0.8, ease:"power2.out", '
+                       'onComplete: function() { gsap.to(this.targets()[0], '
+                       '{ textShadow: "0 0 20px rgba(255,255,255,0.5), 0 0 40px rgba(255,255,255,0.2)", '
+                       'duration: 0.4, yoyo: true, repeat: 1 }); } }',
+        "slide_up":    '{ opacity:0, y:50, duration:0.6, ease:"power2.out" }',
+        "slide_down":  '{ opacity:0, y:-50, duration:0.6, ease:"power2.out" }',
     }
     return table.get(preset, table["fade"])
 
@@ -253,8 +265,12 @@ def build_html(spec):
         '*{margin:0;padding:0;box-sizing:border-box;}',
         'html,body{width:%dpx;height:%dpx;overflow:hidden;%sfont-family:"CJK",sans-serif;}' % (W, H, bg_css),
         '.cap{position:absolute;color:#fff;'
-        'font-weight:800;letter-spacing:2px;text-shadow:0 6px 24px rgba(0,0,0,.5);}',
-        '.accent{color:%s;}' % primary,
+        'font-weight:700;letter-spacing:1px;'
+        'text-shadow:0 0 1px rgba(0,0,0,0.9),0 2px 4px rgba(0,0,0,0.6),0 4px 16px rgba(0,0,0,0.4);'
+        'padding:16px 32px;border-radius:12px;'
+        'background:rgba(8,12,24,0.45);border:1px solid rgba(255,255,255,0.06);'
+        'box-shadow:0 8px 32px rgba(0,0,0,0.3),inset 0 1px 0 rgba(255,255,255,0.05);}',
+        '.accent{color:%s;font-weight:800;}' % primary,
         '</style>', '</head>', '<body>',
         '<div id="root" data-composition-id="main" data-start="0" data-duration="%s" '
         'data-width="%d" data-height="%d" data-fps="%d">' % (duration, W, H, fps),
