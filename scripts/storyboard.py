@@ -74,6 +74,7 @@ import key_setup  # noqa: E402
 import ux  # noqa: E402
 from image_utils import image_type  # noqa: E402
 from video_segmentation import partition_shots, SEEDANCE_MAX_SECONDS  # noqa: E402
+from board_confirm import _source_refs_fingerprint  # noqa: E402 — v4 shim
 
 
 DEFAULT_MODEL = "gpt-image-2"
@@ -1209,17 +1210,6 @@ def load_plan_json(plan_path):
         ) from e
 
 
-def _source_refs_fingerprint(refs):
-    """Hash reference contents so approvals expire when an upload changes."""
-    digest = hashlib.sha256()
-    for value in refs or []:
-        digest.update(str(value).encode("utf-8"))
-        path = value if isinstance(value, str) and os.path.isabs(value) else os.path.join(ROOT, value) if isinstance(value, str) else None
-        if path and os.path.isfile(path):
-            with open(path, "rb") as handle:
-                digest.update(handle.read())
-        digest.update(b"\0")
-    return digest.hexdigest()
 
 
 def _approval_path(out_dir, kind):
