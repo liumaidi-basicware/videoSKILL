@@ -1,0 +1,96 @@
+{
+  "client": "momax_ip163q22",
+  "revision": 15,
+  "product_type": "半固態10000mAh磁吸行動電源",
+  "product_name": "Momax 1-Power S.Pass²",
+  "product_color": "灰色（中性灰/深灰机身，不是白色、黑色或银色）",
+  "source_url": "https://www.momax.tw/products/ip163q22",
+  "usps": [
+    "革命性的半固態電池技術",
+    "外型纖巧",
+    "支援高達25W無線充電",
+    "支援30W PD快充",
+    "磁吸式一拍即充",
+    "雙設備充電功能",
+    "配備防滑橡膠邊緣",
+    "採用安全型電芯，低溫運行"
+  ],
+  "specs": {
+    "capacity": "10000mAh",
+    "wireless_charging": "up to 25W",
+    "wired_charging": "30W PD",
+    "battery": "semi-solid-state",
+    "price_twd_listed": 2890,
+    "price_twd_sale_listed": 2690
+  },
+  "slogans": [],
+  "texts": [
+    "產品頁列示售價NT$2,890，特價NT$2,690；價格與活動資訊出片前需再次確認。"
+  ],
+  "images": [
+    {
+      "path": "assets/momax_ip163q22/images/product-gray-clean-1_737386228.png",
+      "tag": "product-gray-clean-1",
+      "generated": true,
+      "model": "gpt-image-2",
+      "processing_kind": "cleaned_img2img",
+      "prompt": "清洗并标准化为干净的产品参考图。保持 Momax 1-Power S.Pass² 半固态10000mAh磁吸行动电源的真实外形、磁吸面、接口、按键、材质和结构完全不变。产品机身必须统一为中性灰/深灰色，这是不可变的产品事实；禁止变成白色、黑色、银色、蓝色、金色、米色或任何其他色调。仅允许自然灰阶高光和阴影，不得重新上色、染色、金属化或提亮机身。去掉网页杂讯和无关背景，不添加文字，不改变产品设计。",
+      "status": "confirmed",
+      "source": "assets/momax_ip163q22/raw/product_1.jpg",
+      "source_kind": "product_or_screenshot",
+      "via": "standardize",
+      "sha256": "be5fa50fe370b27a0fc6b0f2a630326fb68bf17a9da5678479de964cdf1fd713"
+    },
+    {
+      "path": "assets/momax_ip163q22/images/product-gray-clean-2_737479255.png",
+      "tag": "product-gray-clean-2",
+      "generated": true,
+      "model": "gpt-image-2",
+      "processing_kind": "cleaned_img2img",
+      "prompt": "清洗并标准化为干净的产品参考图。保持 Momax 1-Power S.Pass² 半固态10000mAh磁吸行动电源的真实外形、磁吸面、接口、按键、材质和结构完全不变。产品机身必须统一为中性灰/深灰色，这是不可变的产品事实；禁止变成白色、黑色、银色、蓝色、金色、米色或任何其他色调。仅允许自然灰阶高光和阴影，不得重新上色、染色、金属化或提亮机身。去掉网页杂讯和无关背景，不添加文字，不改变产品设计。",
+      "status": "confirmed",
+      "source": "assets/momax_ip163q22/raw/product_2.jpg",
+      "source_kind": "product_or_screenshot",
+      "via": "standardize",
+      "sha256": "8e9b85f38b81d11a1445edbcd47a92215a4b4b685a13fa021daf31db713c57fe"
+    },
+    {
+      "path": "assets/momax_ip163q22/images/product-gray-clean-3_737581780.png",
+      "tag": "product-gray-clean-3",
+      "generated": true,
+      "model": "gpt-image-2",
+      "processing_kind": "cleaned_img2img",
+      "prompt": "清洗并标准化为干净的产品参考图。保持 Momax 1-Power S.Pass² 半固态10000mAh磁吸行动电源的真实外形、磁吸面、接口、按键、材质和结构完全不变。产品机身必须统一为中性灰/深灰色，这是不可变的产品事实；禁止变成白色、黑色、银色、蓝色、金色、米色或任何其他色调。仅允许自然灰阶高光和阴影，不得重新上色、染色、金属化或提亮机身。去掉网页杂讯和无关背景，不添加文字，不改变产品设计。",
+      "status": "confirmed",
+      "source": "assets/momax_ip163q22/raw/product_3.jpg",
+      "source_kind": "product_or_screenshot",
+      "via": "standardize",
+      "sha256": "fb5c6b41a0fc63631a11bec06fd02a9cf4410cd67ad22923929bc3c70fff1f94"
+    },
+    {
+      "path": "assets/momax_ip163q22/images/product-gray-clean-4_737674042.png",
+      "tag": "product-gray-clean-4",
+      "generated": true,
+      "model": "gpt-image-2",
+      "processing_kind": "cleaned_img2img",
+      "prompt": "清洗并标准化为干净的产品参考图。保持 Momax 1-Power S.Pass² 半固态10000mAh磁吸行动电源的真实外形、磁吸面、接口、按键、材质和结构完全不变。产品机身必须统一为中性灰/深灰色，这是不可变的产品事实；禁止变成白色、黑色、银色、蓝色、金色、米色或任何其他色调。仅允许自然灰阶高光和阴影，不得重新上色、染色、金属化或提亮机身。去掉网页杂讯和无关背景，不添加文字，不改变产品设计。",
+      "status": "confirmed",
+      "source": "assets/momax_ip163q22/raw/product_4.jpg",
+      "source_kind": "product_or_screenshot",
+      "via": "standardize",
+      "sha256": "fe724637a265bdacbfab7118d9b90e76644f539d7d6e7b63b025d9b3c736ed6f"
+    }
+  ],
+  "style_hints": [
+    "科技感",
+    "精緻",
+    "深色棚拍"
+  ],
+  "render_profile": {
+    "video_style_prompt": "premium consumer electronics commercial, dark graphite studio, controlled red accents, realistic product materials, clean Taiwanese retail aesthetic",
+    "aspect_ratio": "9:16",
+    "resolution": "1080p"
+  },
+  "render_plan": null,
+  "ppt_files": []
+}

@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""Video compositing via ffmpeg: concat segments, overlay brand logo watermark.
+
+Requires ffmpeg on PATH. Used by interview (segment concat) and as the
+logo-in-motion fallback (fixed watermark overlay) mentioned in the plan.
+
+CLI:
+  # concat several clips into one (re-encode for safe joining)
+  python3 compose.py concat --inputs a.mp4 b.mp4 c.mp4 --out output/final.mp4
+  # overlay a logo PNG (top-right by default)
+  python3 compose.py logo --input in.mp4 --logo brand/logo.png --out out.mp4 [--pos tr --scale 0.12]
+"""
+import os
+import sys
+import json
+import shutil
+import argparse
+import subprocess
+import tempfile
+
+
+def _ffmpeg_bin():
+    """Prefer system ffmpeg; fall back to the pip imageio-ffmpeg static binary."""
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return exe
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
+def _ffprobe_bin():
+    exe = shutil.which("ffprobe")
+    if exe:
+        return exe
+    try:
+        from static_ffmpeg import run
+        _ffmpeg, ffprobe = run.get_or_fetch_platform_executables_else_raise()
+        return ffprobe
+    except Exception:
+        return None
+
+
+def _need_ffmpeg():
+    if not _ffmpeg_bin() or not _ffprobe_bin():
+        raise SystemExit("ERROR: ffmpeg not found. Install one of:\n"
+                         "  pip3 install imageio-ffmpeg   (bundled static binary, no admin)\n"
+                         "  brew install ffmpeg           (macOS)")
+
+
+def _run(cmd):
+    if cmd and cmd[0] == "ffmpeg":
+        cmd = [_ffmpeg_bin()] + cmd[1:]
+    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if p.returncode != 0:
+        raise SystemExit("ffmpeg failed:\n" + p.stdout.decode("utf-8", "replace")[-1500:])
+
+
+def _video_ok(path):
+    if not os.path.isfile(path) or os.path.getsize(path) == 0:
+        return False
+    p = subprocess.run([_ffprobe_bin(), "-v", "error", "-select_streams", "v:0",
+                        "-show_entries", "stream=codec_type", "-of", "csv=p=0", path],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return p.returncode == 0 and "video" in p.stdout
+
+
+def _atomic_target(out_path):
+    out_path = os.path.abspath(out_path)
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    temp_dir = tempfile.mkdtemp(prefix=".compose-", dir=os.path.dirname(out_path) or ".")
+    temporary = os.path.join(temp_dir, os.path.basename(out_path))
+    return out_path, temporary
+
+
+def concat(inputs, out_path):
+    """Concatenate clips. Re-encode each to a common format for reliable joining."""
+    _need_ffmpeg()
+    out_path, temporary = _atomic_target(out_path)
+    tmpdir = tempfile.mkdtemp(prefix="compose_")
+    normed = []
+    try:
+        for i, src in enumerate(inputs):
+            if not os.path.isfile(src):
+                raise SystemExit("input not found: %s" % src)
+            dst = os.path.join(tmpdir, "n%02d.mp4" % i)
+            probe = subprocess.run(
+                [_ffprobe_bin(), "-v", "error",
+                 "-select_streams", "a:0", "-show_entries", "stream=index",
+                 "-of", "csv=p=0", src], stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True)
+            has_audio = probe.returncode == 0 and bool(probe.stdout.strip())
+            cmd = ["ffmpeg", "-y", "-i", src]
+            if not has_audio:
+                cmd += ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
+            cmd += ["-map", "0:v:0", "-map", "0:a:0" if has_audio else "1:a:0",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                    "-c:a", "aac", "-ar", "48000", "-ac", "2", "-shortest",
+                    "-vsync", "cfr", "-r", "30", "-pix_fmt", "yuv420p", dst]
+            _run(cmd)
+            normed.append(dst)
+        listfile = os.path.join(tmpdir, "list.txt")
+        with open(listfile, "w") as f:
+            for n in normed:
+                f.write("file '%s'\n" % n)
+        _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", listfile,
+              "-c", "copy", temporary])
+        if not _video_ok(temporary):
+            raise SystemExit("ffmpeg concat did not produce valid video")
+        os.replace(temporary, out_path)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        if os.path.exists(temporary):
+            os.remove(temporary)
+        shutil.rmtree(os.path.dirname(temporary), ignore_errors=True)
+    return out_path
+
+
+_POS = {
+    "tr": "W-w-{m}:{m}", "tl": "{m}:{m}",
+    "br": "W-w-{m}:H-h-{m}", "bl": "{m}:H-h-{m}",
+}
+
+
+def overlay_logo(input_path, logo_path, out_path, pos="tr", scale=0.12, margin=24):
+    """Overlay a logo PNG. Fallback for keeping brand Logo crisp in AI-generated motion."""
+    _need_ffmpeg()
+    if not os.path.isfile(logo_path):
+        raise SystemExit("logo not found: %s" % logo_path)
+    if not 0 < scale <= 1:
+        raise SystemExit("logo scale must satisfy 0 < scale <= 1")
+    out_path, temporary = _atomic_target(out_path)
+    xy = _POS.get(pos, _POS["tr"]).format(m=margin)
+    canvas_width = _video_width(input_path)
+    logo_width = max(1, round(canvas_width * scale))
+    filt = ("[1:v]scale=%d:-1[lg];[0:v][lg]overlay=%s:eof_action=pass:shortest=0" %
+            (logo_width, xy))
+    try:
+        _run(["ffmpeg", "-y", "-i", input_path, "-loop", "1", "-i", logo_path,
+              "-filter_complex", filt, "-map", "0:a?", "-c:v", "libx264",
+              "-pix_fmt", "yuv420p", "-c:a", "copy", "-t", _duration(input_path), temporary])
+        if not _video_ok(temporary):
+            raise SystemExit("ffmpeg logo overlay did not produce valid video")
+        os.replace(temporary, out_path)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
+        shutil.rmtree(os.path.dirname(temporary), ignore_errors=True)
+    return out_path
+
+
+def _duration(path):
+    p = subprocess.run([_ffprobe_bin(), "-v", "error", "-show_entries", "format=duration",
+                        "-of", "default=nw=1:nk=1", path], stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE, text=True)
+    try:
+        duration = float(p.stdout.strip())
+    except ValueError:
+        duration = 0
+    if p.returncode != 0 or duration <= 0:
+        raise SystemExit("cannot probe main video duration: %s" % path)
+    return "%.6f" % duration
+
+
+def _video_width(path):
+    p = subprocess.run([_ffprobe_bin(), "-v", "error", "-select_streams", "v:0",
+                        "-show_entries", "stream=width", "-of", "csv=p=0", path],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        width = int(p.stdout.strip())
+    except ValueError:
+        width = 0
+    if p.returncode != 0 or width <= 0:
+        raise SystemExit("cannot probe main video width: %s" % path)
+    return width
+
+
+def main(argv):
+    p = argparse.ArgumentParser(description="ffmpeg compositing")
+    sub = p.add_subparsers(dest="cmd")
+
+    pc = sub.add_parser("concat")
+    pc.add_argument("--inputs", nargs="+", required=True)
+    pc.add_argument("--out", required=True)
+
+    pl = sub.add_parser("logo")
+    pl.add_argument("--input", required=True)
+    pl.add_argument("--logo", required=True)
+    pl.add_argument("--out", required=True)
+    pl.add_argument("--pos", default="tr", choices=list(_POS.keys()))
+    pl.add_argument("--scale", type=float, default=0.12)
+    pl.add_argument("--margin", type=int, default=24)
+
+    args = p.parse_args(argv)
+    if args.cmd == "concat":
+        out = concat(args.inputs, args.out)
+        print(json.dumps({"ok": True, "out": out}))
+    elif args.cmd == "logo":
+        out = overlay_logo(args.input, args.logo, args.out,
+                           pos=args.pos, scale=args.scale, margin=args.margin)
+        print(json.dumps({"ok": True, "out": out}))
+    else:
+        p.print_help()
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

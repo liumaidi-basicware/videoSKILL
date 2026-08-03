@@ -1,0 +1,21 @@
+{
+  "name": "remotion-engine",
+  "version": "1.1.0",
+  "private": true,
+  "description": "运镜/内容编排引擎（Remotion）——数字人讲解型与产品展示型成片的底层背景+运镜+PPT内容页；集成 remotion-com-skills 组件库做文档/PPT 内容动效。",
+  "scripts": {
+    "render": "remotion render",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.434",
+    "react": "19.0.0",
+    "react-dom": "19.0.0",
+    "remotion": "4.0.434"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.9.3"
+  }
+}

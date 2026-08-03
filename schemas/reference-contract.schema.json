@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Typed Video Reference",
+  "type": "object",
+  "required": ["id", "url", "type", "scope"],
+  "properties": {
+    "id": {"type": "string", "minLength": 1},
+    "url": {"type": "string", "minLength": 1},
+    "type": {"enum": ["character_identity", "product_identity", "scene_environment", "storyboard_composition", "continuation_frame", "generic_visual"]},
+    "scope": {"enum": ["global", "scene", "clip", "beat"]},
+    "label": {"type": "string"},
+    "role": {"type": "string"},
+    "intent": {"type": "string"}
+  }
+}

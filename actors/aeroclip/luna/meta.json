@@ -1,0 +1,20 @@
+{
+  "name": "luna",
+  "client": "aeroclip",
+  "gender": "female",
+  "style": "clean, fresh, modern urban professional, premium consumer electronics spokesperson",
+  "language": "zh",
+  "persona": {
+    "personality": "亲切自信、活力阳光",
+    "profession": "都市白领/运动博主",
+    "age": "25-30岁",
+    "hairstyle": "中长直发，自然黑色，空气刘海",
+    "appearance": "清秀五官，明亮大眼，浅笑酒窝，肤色白皙",
+    "makeup": "清透裸妆，珊瑚色唇彩",
+    "voice_type": "年轻女声，清亮温柔，略带活力",
+    "expression": "微笑、自信、亲和",
+    "body_language": "自然手势、轻松站姿、偶尔拨发"
+  },
+  "default_outfit": null,
+  "source": "generated"
+}

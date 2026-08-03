@@ -1,0 +1,26 @@
+{
+  "name": "mina",
+  "client": "aeroclip",
+  "gender": "female",
+  "style": "K-pop idol aesthetic, sweet-cool vibe, street-casual fashion, trendsetter spokesperson",
+  "language": "zh",
+  "persona": {
+    "personality": "甜酷、自信、有态度但不距离感",
+    "profession": "时尚博主/音乐爱好者",
+    "age": "20-25岁",
+    "hairstyle": "蜜茶色波浪卷长发，微卷层次感，中分或侧分",
+    "appearance": "精致五官，猫系眼，高鼻梁，薄唇微翘，肤色冷白",
+    "makeup": "韩系轻欧美妆，焦糖色眼影，雾面豆沙唇，细眉",
+    "voice_type": "年轻女声，清亮有磁性，略带慵懒，节奏感强",
+    "expression": "不笑时酷飒有气场，笑起来甜且有感染力",
+    "body_language": "随性手势、微歪头、单手撩发、偶尔比心或比耶"
+  },
+  "default_outfit": {
+    "top": "Oversize 纯色卫衣（奶白/浅灰），袖口微堆",
+    "bottom": "高腰阔腿牛仔裤或运动束脚裤",
+    "accessories": "细金属项链、简约耳钉（非佩戴耳夹侧）、金属发夹",
+    "shoes": "厚底小白鞋"
+  },
+  "source": "generated",
+  "created_for": "aeroclip-vertical-short-painpoint"
+}

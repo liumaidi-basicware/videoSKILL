@@ -1,0 +1,9 @@
+{
+  "client": "basicrouter",
+  "colors": {},
+  "fonts": {},
+  "logo": "brand/basicrouter/logo.png",
+  "logo_pos": "tr",
+  "logo_scale": 0.12,
+  "style_prefix": "科技感/深色/SaaS/API网关"
+}

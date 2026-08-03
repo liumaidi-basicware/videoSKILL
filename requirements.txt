@@ -1,0 +1,13 @@
+# 客户品牌 数字员工 — 运行依赖（全部 pip，无需系统级安装/管理员权限）
+# 生产环境请使用 requirements.lock.txt 做可重复安装；本文件保留范围约束供自举使用。
+python-pptx>=0.6.21     # 解析 .pptx
+python-docx>=0.8.11     # 解析 .docx / 生成 .docx
+pymupdf>=1.23.0         # 解析 .pdf（fitz）
+openpyxl>=3.0.0         # 解析 .xlsx
+imageio-ffmpeg>=0.4.9   # 自带静态 ffmpeg 二进制（视频拼接/Logo水印，无需系统装 ffmpeg）
+static-ffmpeg>=2.5      # 静态 ffmpeg+ffprobe 二进制（HyperFrames/Remotion 硬依赖，无需系统装/管理员）
+# macOS Vision OCR 兜底检测（出片后自动抽帧 OCR，防字幕残留漏到客户）
+# 仅 macOS 客户端有效；非 macOS 时 ocr_check.py 静默跳过，不影响出片
+pyobjc-framework-Vision>=10.0   # macOS Vision OCR 框架绑定
+pyobjc-framework-Quartz>=10.0   # Vision 依赖的 Quartz/CoreImage 绑定
+# 注：数字人抠像/换背景一律走外部模型能力（BasicRouter img2img/参考图），本地不装 rembg/onnxruntime，保持轻交付

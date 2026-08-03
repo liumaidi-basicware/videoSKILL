@@ -1,0 +1,37 @@
+{
+  "schema": 2,
+  "policy": "bundled_same_platform_first_then_online_bootstrap",
+  "offline_package": {
+    "installer": "scripts/offline_setup.py",
+    "artifact_manifest": "offline-assets/artifact-manifest.json",
+    "requires_matching_platform": true,
+    "requires_matching_python_abi": true,
+    "network_required": false,
+    "fallback": "online bootstrap when platform, ABI, wheel tag, or digest verification fails"
+  },
+  "python": {
+    "lock": "requirements.lock.txt",
+    "bundled_wheels": true,
+    "bundled_abi": "cp39",
+    "integrity": "SHA-256 tree plus per-wheel tag validation before pip"
+  },
+  "node": {
+    "lock": "remotion_engine/package-lock.json",
+    "bundled_node_modules": "remotion_engine/node_modules",
+    "bundled_platform": "darwin-arm64",
+    "portable_on_windows": false,
+    "offline_runtime": "offline-assets/node-runtime"
+  },
+  "browsers": {
+    "remotion_chrome": "download_per_os_and_architecture",
+    "bundled": true,
+    "bundled_platform": "darwin-arm64",
+    "integrity": "SHA-256 verified archive and safe ZIP extraction",
+    "note": "Other platforms download their matching Chrome artifact during online bootstrap."
+  },
+  "platforms": {
+    "macos": "use bundled node_modules only when architecture matches; otherwise npm ci",
+    "windows": "ignore bundled macOS node_modules and run npm ci",
+    "linux": "ignore bundled macOS node_modules and run npm ci"
+  }
+}

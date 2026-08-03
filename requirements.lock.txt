@@ -1,0 +1,10 @@
+# Generated from the verified macOS runtime on 2026-07-28.
+# Update deliberately and rerun the full test suite when changing versions.
+python-pptx==1.0.2
+python-docx==1.2.0
+PyMuPDF==1.26.5
+openpyxl==3.1.5
+imageio-ffmpeg==0.6.0
+static-ffmpeg==3.0
+pyobjc-framework-Vision==11.1; sys_platform == "darwin"
+pyobjc-framework-Quartz==11.1; sys_platform == "darwin"

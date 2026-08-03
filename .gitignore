@@ -1,0 +1,27 @@
+# Remotion 引擎依赖与缓存（deploy.sh 在目标机 npm install 重建，勿入库/勿打包）
+remotion_engine/node_modules/
+remotion_engine/.remotion/
+remotion_engine/out/
+remotion_engine/public/*
+!remotion_engine/public/.gitkeep
+
+# 渲染产物 / 客户输出
+output/
+_props.json
+_props_*.json
+*.staged.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 系统
+.DS_Store
+
+# 离线预下载二进制（deploy.sh 在目标机按需下载，勿入库）
+offline-assets/
+
+# WorkBuddy 内部记忆（项目级会话数据）
+.workbuddy/

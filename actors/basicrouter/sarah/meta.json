@@ -1,0 +1,16 @@
+{
+  "name": "sarah",
+  "client": "basicrouter",
+  "gender": "",
+  "style": "",
+  "language": "",
+  "persona": {
+    "personality": "专业自信,亲切不冷漠,语气清晰有力",
+    "age": "28-33岁",
+    "appearance": "亚洲面孔,高颧骨,精致五官,自然妆容,黑色直发齐肩",
+    "voice_type": "清晰女声,中英双语,语速适中偏快",
+    "expression": "自信微笑,眼神直视镜头"
+  },
+  "default_outfit": null,
+  "source": "generated"
+}

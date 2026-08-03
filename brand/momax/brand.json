@@ -1,0 +1,13 @@
+{
+  "client": "momax",
+  "colors": {
+    "primary": "#E60012"
+  },
+  "fonts": {
+    "primary": "PingFang SC"
+  },
+  "logo": "brand/momax/logo.png",
+  "logo_pos": "tr",
+  "logo_scale": 0.14,
+  "style_prefix": "科技感、緊湊、深色背景、產品居中"
+}

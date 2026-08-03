@@ -1,0 +1,141 @@
+// 设计系统 - 统一的设计 Tokens
+// Apple 风格主题
+
+export const COLORS = {
+  // 主色调
+  primary: '#007AFF',
+  primaryDark: '#0051D5',
+  primaryLight: '#3399FF',
+
+  // 背景色
+  background: '#000000',
+  backgroundElevated: '#1C1C1E',
+  backgroundSecondary: '#2C2C2E',
+
+  // 文字色
+  text: '#FFFFFF',
+  textSecondary: '#8E8E93',
+  textTertiary: '#636366',
+
+  // 系统色
+  success: '#34C759',
+  warning: '#FF9500',
+  error: '#FF3B30',
+  info: '#5AC8FA',
+
+  // 扩展多彩色板 - 用于知识图谱和复杂展示
+  extended: {
+    orange: '#FF9500',
+    yellow: '#FFCC00',
+    green: '#34C759',
+    teal: '#5AC8FA',
+    cyan: '#32ADE6',
+    blue: '#007AFF',
+    indigo: '#5856D6',
+    purple: '#AF52DE',
+    pink: '#FF2D55',
+    red: '#FF3B30',
+  },
+
+  // 渐变
+  gradient: {
+    primary: ['#007AFF', '#5856D6'],
+    glow: ['rgba(0, 122, 255, 0.3)', 'rgba(0, 122, 255, 0)'],
+  },
+};
+
+export const FONTS = {
+  // 主字体
+  display: '-apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif',
+  text: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif',
+  mono: '"SF Mono", "Fira Code", "JetBrains Mono", Monaco, Consolas, monospace',
+};
+
+export const SIZES = {
+  // 标题字号（增大，更有冲击力）
+  hero: 120,      // 从 96 增大到 120
+  h1: 88,         // 从 72 增大到 88
+  h2: 56,         // 从 48 增大到 56
+  h3: 40,         // 从 32 增大到 40
+  h4: 28,         // 从 24 增大到 28
+  body: 20,       // 从 18 增大到 20
+  caption: 16,    // 从 14 增大到 16
+
+  // 间距
+  spacing: {
+    xs: 8,
+    sm: 16,
+    md: 24,
+    lg: 32,
+    xl: 48,
+    xxl: 64,
+    xxxl: 96,
+  },
+
+  // 圆角
+  radius: {
+    sm: 8,
+    md: 12,
+    lg: 16,
+    xl: 24,
+    xxl: 32,
+  },
+};
+
+// 动画时长（帧数，基于 30fps）
+export const DURATIONS = {
+  fast: 10,      // 0.33s
+  normal: 20,    // 0.66s
+  slow: 30,      // 1s
+  slower: 45,    // 1.5s
+  slowest: 60,   // 2s
+};
+
+// 延迟（用于列表项错开动画）
+export const STAGGER = {
+  fast: 5,
+  normal: 8,
+  slow: 12,
+};
+
+// 竖屏专用字号（9:16 布局，增大字号提升可读性）
+export const PORTRAIT_SIZES = {
+  hero: 80,       // 主标题（增大）
+  h1: 60,         // 章节标题（增大）
+  h2: 42,         // 副标题（增大）
+  h3: 30,         // 功能标题（增大）
+  h4: 22,         // 描述文字（增大）
+  body: 18,       // 正文（增大）
+  caption: 14,    // 说明文字（增大）
+
+  // 竖屏间距（保持）
+  spacing: {
+    xs: 6,
+    sm: 12,
+    md: 18,
+    lg: 24,
+    xl: 36,
+    xxl: 48,
+    xxxl: 72,
+  },
+
+  // 竖屏圆角（保持）
+  radius: {
+    sm: 8,
+    md: 12,
+    lg: 16,
+    xl: 24,
+    xxl: 32,
+  },
+};
+
+// 竖屏布局尺寸
+export const PORTRAIT_LAYOUT = {
+  width: 1080,
+  height: 1920,
+  aspectRatio: 9 / 16,
+  contentWidth: 960,      // 内容区域宽度（留边距 60px）
+  contentPadding: 60,     // 左右内边距
+  safeAreaTop: 120,       // 顶部安全区域
+  safeAreaBottom: 200,    // 底部安全区域
+};
