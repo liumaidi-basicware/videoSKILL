@@ -21,6 +21,16 @@ if HERE not in sys.path:
 
 from board_plan import normalize_panel_plan
 
+# 安全区提示（与 motion_design.SAFE_ZONES 对齐）
+_SAFE_ZONE_STORYBOARD_HINTS = {
+    "lower_third": "构图时下方留 25% 空白区，不放置关键主体、人脸或产品细节（后期字幕叠加区）",
+    "upper_third": "构图时上方留 20% 空白区，不放置关键主体或人脸（后期标题叠加区）",
+    "center": "构图时中央留白，主体偏左或偏右（后期标题/关键词居中叠加）",
+    "corner": "构图时右上角留空，不放置关键元素（后期数据卡片叠加区）",
+    "left": "构图时左侧留 30% 空白（后期文字内容叠加区）",
+    "right": "构图时右侧留 30% 空白（后期文字内容叠加区）",
+}
+
 CONTINUITY_LOCK = (
     "CONTINUITY LOCK: identical character identity (face, hairstyle, build, "
     "wardrobe, accessories) across all panels and segments. Same product "
@@ -114,6 +124,17 @@ def shot_prompt(plan, shot, idx, bw=True, strict_bw=False):
 
     if panel_block:
         parts.append(panel_block)
+
+    # 动效安全区：故事板构图预留文字叠加空间
+    safe_zones = shot.get("video_safe_zones") or []
+    motion_design = shot.get("motion_design") or {}
+    if not safe_zones and motion_design:
+        safe_zones = motion_design.get("video_safe_zones") or []
+    if safe_zones:
+        hints = [_SAFE_ZONE_STORYBOARD_HINTS[z] for z in safe_zones
+                 if z in _SAFE_ZONE_STORYBOARD_HINTS]
+        if hints:
+            parts.append("构图安全区（重要）：%s。" % "；".join(hints))
 
     parts.append(CONTINUITY_LOCK)
 

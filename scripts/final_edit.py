@@ -204,12 +204,34 @@ def _map_motion_position(text, style):
 
 
 def _build_motion_overlay(shot):
-    """把逆向 shot 的三分离字段（motion_suggestion + motion_content）
-    编译成 Remotion MotionOverlay 组件 props。返回 dict 或 None（无动效内容）。
+    """把 shot 的动效设计编译成 Remotion MotionOverlay 组件 props。
 
-    向后兼容：若 shot 只有旧的 motion_overlay 自由文本（无 motion_content），
-    退回 _overlay_to_content 拆 title/bullets。
+    优先级：
+      1. motion_design（motion_design.py 导演级预规划）→ 直接使用
+      2. motion_suggestion + motion_content（video_reverse 逆向工程三分离）
+      3. motion_overlay 自由文本兜底
     """
+    # 1. 导演级预规划动效设计（最高优先级）
+    md = shot.get("motion_design")
+    if isinstance(md, dict):
+        overlay_spec = md.get("motion_overlay") or {}
+        if overlay_spec.get("style") and overlay_spec["style"] != "none":
+            result = {
+                "style": overlay_spec["style"],
+                "position": overlay_spec.get("position") or "center",
+                "timing": overlay_spec.get("timing") or "",
+            }
+            if overlay_spec.get("title"):
+                result["title"] = overlay_spec["title"]
+            if overlay_spec.get("bullets"):
+                result["bullets"] = overlay_spec["bullets"][:5]
+            if overlay_spec.get("metric"):
+                m = overlay_spec["metric"]
+                result["metric"] = {"value": str(m.get("value", "")),
+                                    "label": str(m.get("label", ""))}
+            return result
+
+    # 2. 逆向工程三分离字段
     sug = shot.get("motion_suggestion") if isinstance(shot.get("motion_suggestion"), dict) else {}
     content = shot.get("motion_content") if isinstance(shot.get("motion_content"), dict) else {}
 

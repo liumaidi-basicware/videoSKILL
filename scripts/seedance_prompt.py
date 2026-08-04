@@ -8,6 +8,16 @@ MOTION_TERMS = ("static", "locked", "push", "pull", "pan", "tilt", "orbit", "arc
                 "dolly", "tracking", "handheld", "whip", "zoom", "crane", "overhead",
                 "环绕", "推进", "拉远", "横摇", "竖摇", "跟拍", "手持", "快速平移", "固定机位", "俯拍")
 
+# 安全区指令模板（与 motion_design.SAFE_ZONES 对齐）
+_SAFE_ZONE_HINTS = {
+    "lower_third": "Keep the lower 25% of the frame clear of key action, faces, and product details; this space is reserved for subtitle overlay.",
+    "upper_third": "Keep the upper 20% of the frame clear of key action and faces; this space is reserved for title overlay.",
+    "center": "Keep the center of the frame clear for a title reveal; position key subjects slightly off-center.",
+    "corner": "Keep the upper-right corner clear; a small data card will appear there.",
+    "left": "Keep the left 30% of the frame clear; text content will appear on the left side.",
+    "right": "Keep the right 30% of the frame clear; text content will appear on the right side.",
+}
+
 
 def is_seedance_model(model):
     return str(model or "").lower() in SEEDANCE_MODELS
@@ -210,6 +220,18 @@ def _build_continuity_lock(segment):
         lines.append(
             "音画同步：台词必须在 %s 秒内以自然语速念完，嘴唇动作与发音精确同步。"
             % _clean(duration))
+
+    # ── 画面安全区（为后期字幕/动效预留空间）──
+    safe_zones = segment.get("video_safe_zones") or []
+    motion_design = segment.get("motion_design") or {}
+    if not safe_zones and motion_design:
+        safe_zones = motion_design.get("video_safe_zones") or []
+    if safe_zones:
+        hints = [_SAFE_ZONE_HINTS[z] for z in safe_zones if z in _SAFE_ZONE_HINTS]
+        if hints:
+            lines.append(
+                "画面构图安全区（重要）：%s 这些区域不要放置关键动作、人脸或产品细节，"
+                "后期会在此区域叠加文字/动效。" % " ".join(hints))
 
     return lines
 

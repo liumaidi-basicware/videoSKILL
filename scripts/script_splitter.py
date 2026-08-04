@@ -766,6 +766,9 @@ def split(plan, storyboard_dir=None, fps=30, min_seconds=3, bw_storyboard=None,
                                           (shot.get("extend_from_previous") or shot.get("extend"))),
             "clothing_lock": clothing_lock,
             "character_identity_lock": bool(has_human),
+            # 动效设计规范（motion_design.py 预规划）：安全区 + 字幕/动效 spec
+            "video_safe_zones": shot.get("video_safe_zones") or [],
+            "motion_design": shot.get("motion_design"),
             # Keep authored graphics out of the video prompt, but carry them
             # forward for the post-production HyperFrames stage.
             "motion_elements": list(shot.get("motion_elements") or [])
