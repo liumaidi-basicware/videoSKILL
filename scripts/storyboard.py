@@ -188,14 +188,28 @@ def _load_prompt_review_for_shots(path, plan):
             "PROMPT_REVIEW_REQUIRED: 中文提示词审核文件不存在，请先运行 prompt_review.py polish。")
     with open(path, encoding="utf-8") as handle:
         review = json.load(handle)
-    if (review.get("status") != "confirmed" or review.get("stage") != "storyboard" or
-            review.get("plan_fingerprint") != _digest_plan_for_prompt_review(plan)):
-        raise br_client.BRError("PROMPT_REVIEW_REQUIRED: 故事板中文提示词未按当前计划确认。")
+    if review.get("status") != "confirmed":
+        raise br_client.BRError(
+            "PROMPT_REVIEW_REQUIRED: 提示词审核文件未确认（status=%s）。"
+            "请运行 prompt_review.py confirm 确认后再生成。" % review.get("status"))
+    if review.get("stage") != "storyboard":
+        raise br_client.BRError(
+            "PROMPT_REVIEW_REQUIRED: 提示词审核文件阶段不匹配（stage=%s，期望 storyboard）。"
+            "请重新运行 prompt_review.py polish --stage storyboard。" % review.get("stage"))
+    expected_fp = _digest_plan_for_prompt_review(plan)
+    if review.get("plan_fingerprint") != expected_fp:
+        raise br_client.BRError(
+            "PROMPT_REVIEW_REQUIRED: 提示词审核的指纹与当前计划不匹配\n"
+            "  审核文件指纹: %s\n  当前计划指纹: %s\n"
+            "  原因：计划在审核确认后被修改过。请重新运行 prompt_review.py polish + confirm。"
+            % (review.get("plan_fingerprint"), expected_fp))
     prompts = {str(item.get("shot_id")): item.get("prompt_zh")
                for item in review.get("prompts") or []}
     for shot in plan.get("shots") or []:
         if not prompts.get(str(shot.get("id"))):
-            raise br_client.BRError("PROMPT_REVIEW_REQUIRED: 缺少镜头 %s 的确认提示词。" % shot.get("id"))
+            raise br_client.BRError(
+                "PROMPT_REVIEW_REQUIRED: 缺少镜头 %s 的确认提示词。"
+                "请重新运行 prompt_review.py polish + confirm。" % shot.get("id"))
         shot["approved_prompt_zh"] = prompts[str(shot.get("id"))]
 
 
@@ -718,10 +732,21 @@ def shot_prompt(plan, shot, idx, bw=True, strict_bw=False):
         "do not render any such graphics in this storyboard image."
         if motion_elements else ""
     )
+    # Grid layout adapts to aspect ratio: landscape 16:9 → 4x3, portrait 9:16 → 3x4
+    aspect = plan.get("aspect_ratio", "16:9")
+    if aspect in ("9:16", "3:4"):
+        grid_desc = "3x4"
+        canvas_desc = "9:16" if aspect == "9:16" else "3:4"
+    else:
+        grid_desc = "4x3"
+        canvas_desc = "16:9"
+
     return (
-        "Create a 16:9 cinematic storyboard TABLE with twelve movie-style panels arranged as a clean 4x3 grid / 16:9电影风格12格故事板表格。"
+        "Create a %s cinematic storyboard TABLE with twelve movie-style panels arranged as a clean %s grid / %s电影风格12格故事板表格。"
+        % (canvas_desc, grid_desc, canvas_desc)
         + bw_block
-        + "The single image must contain TWELVE panels arranged in a clean 4x3 grid inside one 16:9 canvas, each panel showing a distinct beat of the SAME segment. "
+        + "The single image must contain TWELVE panels arranged in a clean %s grid inside one %s canvas, each panel showing a distinct beat of the SAME segment. "
+        % (grid_desc, canvas_desc)
         + "The drawing itself is ONLY rough black-and-white pencil lines, minimal detail, quick loose construction, simple anatomy, strong silhouette readability, lightweight dynamic unfinished early choreography previsualization. "
         + "Add director annotation marks as a separate overlay layer: RED arrows for body motion, BLUE arrows for camera motion, GREEN marks for framing/composition notes, ORANGE marks for lighting direction, PURPLE marks for sound/emotional emphasis, and BLACK short shot notes/panel labels. Annotation colors are allowed only for these marks; all characters, environment, smoke, fabric, reflections and drawn imagery remain black/white/gray. "
         + "Use handheld energy, whip pans, orbiting camera, overhead view, side profile silhouette, aggressive close-up, and long-lens compression across the sequence. Keep the environment minimal: open space, smoke, fabric motion, reflected light. Make performers feel trapped between ritual and emotional release. "
@@ -1437,7 +1462,9 @@ def render_storyboard(plan_path, out_dir, model=DEFAULT_MODEL, run_id=None, flat
               "仅供底片生成后 HyperFrames 使用" % len(migrated_motion), flush=True)
     plan = expand_product_sku_refs(canonical_storyboard_plan(plan))
     os.makedirs(out_dir, exist_ok=True)
-    ratio = "16:9"
+    # Use the plan's aspect ratio, not hardcoded 16:9. A 9:16 vertical project
+    # must generate 9:16 storyboards so the composition matches the final video.
+    ratio = plan.get("aspect_ratio") or "16:9"
     if run_id and os.path.basename(out_dir) != safe_name(run_id):
         print("[storyboard] plan changed; creating new revision: %s" %
               os.path.basename(out_dir), flush=True)

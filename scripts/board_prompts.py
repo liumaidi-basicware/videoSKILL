@@ -91,9 +91,14 @@ def shot_prompt(plan, shot, idx, bw=True, strict_bw=False):
 
     style = plan.get("visual_style", "clean premium commercial")
     aspect = plan.get("aspect_ratio", "16:9")
+    # Grid layout adapts to aspect ratio: landscape 16:9 → 4x3, portrait 9:16 → 3x4
+    if aspect in ("9:16", "3:4"):
+        grid_desc = "3 rows × 4 columns = 12 panels"
+    else:
+        grid_desc = "4 rows × 3 columns = 12 panels"
 
     parts = [
-        "Cinematic 16:9 storyboard contact sheet, 4 rows × 3 columns = 12 panels.",
+        "Cinematic %s storyboard contact sheet, %s." % (aspect, grid_desc),
         "Shot %d (%s): %s" % (idx, shot.get("id", ""), shot.get("visual", "")),
     ]
 

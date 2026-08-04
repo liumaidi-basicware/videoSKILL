@@ -63,6 +63,48 @@ def _panel_items(shot):
     return list(value) if isinstance(value, (list, tuple)) else [value]
 
 
+def _split_dialogue(dialogue, offset, take, total):
+    """Split dialogue proportionally when a shot is split into time parts.
+
+    When a 20s shot with 40 chars of dialogue is split into 0-10s and 10-20s,
+    each part should get roughly its proportional share of the dialogue,
+    not the full text. This prevents the prompt pollution where every segment
+    repeats the entire dialogue (真实故障：段2重复段1台词、段3塞入CTA、段4又重复CTA)。
+
+    Args:
+        dialogue: the full dialogue string
+        offset: start time of this part (seconds)
+        take: duration of this part (seconds)
+        total: total duration of the original shot (seconds)
+    Returns:
+        The proportional slice of dialogue for this time window.
+    """
+    if not dialogue or total <= 0:
+        return dialogue
+    text = str(dialogue).strip()
+    if not text:
+        return text
+    # Calculate character positions based on time ratio
+    chars = len(text)
+    start_ratio = offset / total
+    end_ratio = (offset + take) / total
+    start_char = int(chars * start_ratio)
+    end_char = int(chars * end_ratio)
+    # Snap to sentence boundaries (。！？；) to avoid cutting mid-sentence
+    if start_char > 0:
+        for i in range(start_char, min(start_char + 10, chars)):
+            if text[i] in "。！？；":
+                start_char = i + 1
+                break
+    if end_char < chars:
+        for i in range(end_char, max(end_char - 10, start_char), -1):
+            if i > 0 and text[i - 1] in "。！？；":
+                end_char = i
+                break
+    result = text[start_char:end_char].strip()
+    return result if result else text  # fallback: if split produces empty, keep full
+
+
 def partition_shots(shots, max_seconds=SEEDANCE_MAX_SECONDS, scene_aware="auto",
                     preserve_shots=False):
     """Partition shots by scene boundary first, then by model duration limit."""
@@ -112,6 +154,17 @@ def partition_shots(shots, max_seconds=SEEDANCE_MAX_SECONDS, scene_aware="auto",
                 item["segment_offset"] = round(offset, 3)
                 item["segment_part"] = part
                 item["duration"] = round(take, 3)
+                # Split dialogue proportionally to prevent cross-segment duplication
+                dialogue = item.get("dialogue") or item.get("voiceover")
+                if dialogue:
+                    item["dialogue"] = _split_dialogue(dialogue, offset, take, total)
+                    item["voiceover"] = _split_dialogue(dialogue, offset, take, total)
+                # Split dialogue proportionally across parts — never duplicate.
+                # A 20s shot split into 0-10s + 10-20s must give each part only
+                # the dialogue for its time window, not the full 20s dialogue.
+                dialogue = str(shot.get("dialogue") or shot.get("voiceover") or "").strip()
+                if dialogue:
+                    item["dialogue"] = _split_dialogue(dialogue, offset, take, total)
                 if panel_plan:
                     start = int(round((offset / total) * len(panel_plan)))
                     end = int(round(((offset + take) / total) * len(panel_plan)))
@@ -179,6 +232,39 @@ def _merge_values(items, key):
             if item not in merged:
                 merged.append(deepcopy(item))
     return merged
+
+
+def _split_dialogue(dialogue, offset, take, total):
+    """Split dialogue proportionally across split parts.
+
+    Splits by sentence boundaries (。！？；) when possible, falling back to
+    character-count proportional split. Never duplicates dialogue across parts.
+    """
+    import re as _re
+    if not dialogue or total <= 0:
+        return dialogue
+    # Split into sentences
+    sentences = [s.strip() for s in _re.split(r"(?<=[。！？；!?.;])", dialogue) if s.strip()]
+    if len(sentences) <= 1:
+        # Single sentence: split by character count proportionally
+        chars = list(dialogue)
+        start_idx = int(round((offset / total) * len(chars)))
+        end_idx = int(round(((offset + take) / total) * len(chars)))
+        return "".join(chars[start_idx:end_idx]).strip()
+    # Multi-sentence: assign sentences to time windows proportionally
+    total_chars = sum(len(s) for s in sentences)
+    start_ratio = offset / total
+    end_ratio = (offset + take) / total
+    result = []
+    cursor = 0.0
+    for sentence in sentences:
+        s_start = cursor / total_chars
+        s_end = (cursor + len(sentence)) / total_chars
+        # Include sentence if it overlaps with this part's time window
+        if s_end > start_ratio and s_start < end_ratio:
+            result.append(sentence)
+        cursor += len(sentence)
+    return "".join(result).strip()
 
 
 def _merge_timeline(items):

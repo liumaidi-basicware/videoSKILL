@@ -187,6 +187,51 @@ def _stage_artifacts(manifest, stage, *, refresh=False):
     return records
 
 
+def add_stage_artifacts(manifest, stage, paths):
+    """Add artifacts to a stage's generation record and invalidate downstream approvals.
+
+    Use this when additional artifacts (e.g., manually generated boards) need to be
+    included in a stage after its initial mark_generation_finished. The function:
+      1. Merges new artifacts with existing ones (dedup by path)
+      2. Recomputes the stage's approval hash
+      3. Invalidates all downstream stage approvals (they depend on this stage's hash)
+
+    This is the ONLY safe way to add artifacts post-generation. Directly modifying
+    manifest["generation"][stage]["artifacts"] without calling this function will
+    cause approval_is_current to fail (hash mismatch).
+    """
+    if stage not in BASE_DEPENDENCIES and stage != "video":
+        raise ValueError("未知生成阶段: %s" % stage)
+    generation = manifest.setdefault("generation", {}).setdefault(stage, {})
+    existing = generation.get("artifacts") or []
+    existing_paths = {r.get("path") for r in existing if r.get("path")}
+
+    new_records = []
+    for path in paths:
+        record = _file_record(path)
+        if record and record.get("exists"):
+            if record["path"] not in existing_paths:
+                new_records.append(record)
+                existing_paths.add(record["path"])
+
+    if not new_records:
+        return manifest  # nothing new to add
+
+    generation["artifacts"] = existing + new_records
+    generation.setdefault("outputs", []).extend(
+        r["path"] for r in new_records if r["path"] not in (generation.get("outputs") or []))
+
+    # Recompute approval hash with the expanded artifact set
+    if manifest.get("approvals", {}).get(stage):
+        manifest.setdefault("approval_hashes", {})[stage] = _approval_input_hash(manifest, stage)
+        # Invalidate downstream approvals — they were built on the old hash
+        for downstream in _downstream_stages(stage):
+            manifest.setdefault("approvals", {})[downstream] = False
+            manifest.setdefault("approval_hashes", {}).pop(downstream, None)
+
+    return manifest
+
+
 def _approval_input_hash(manifest, stage, *, refresh=False):
     """Hash stage outputs plus the exact upstream approvals they were built on."""
     records = _stage_artifacts(manifest, stage, refresh=refresh)
