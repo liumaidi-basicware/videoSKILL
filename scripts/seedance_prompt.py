@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Compile structured shot data into a Seedance-native video prompt."""
+import json
 import re
 
 SEEDANCE_MODELS = {"seedance-2.0", "seedance-2.0-fast", "seedance-2.0-white"}
@@ -62,10 +63,15 @@ def _reference_clause(ref, index):
 
 
 def compile_prompt(segment, refs=None, *, style=None, negative=None, target_model="seedance-2.0"):
-    """Build a structured timeline prompt for Seedance or its Kling fallback.
+    """Build a director-grade video prompt optimized for the target model.
 
-    The prompt intentionally uses timestamped beats, as Seedance responds more
-    reliably to a short, concrete timeline than to a long prose paragraph.
+    Structure follows 2026 best practices (researched from Seedance/Kling/Veo/Wan):
+    1. Lead with shot type + camera movement (Kling) or subject + action (Seedance)
+    2. One clear moment per generation — not a scene's worth of choreography
+    3. Specific cinematography terms (Kling responds to these)
+    4. Character identity re-injected per segment
+    5. Style anchors (1-2 strong, not 10 adjectives)
+    6. Constraints at the end (negative instructions last)
     """
     timeline = segment.get("timeline") or []
     if not timeline:
@@ -75,72 +81,191 @@ def compile_prompt(segment, refs=None, *, style=None, negative=None, target_mode
                      "camera": segment.get("camera_movement") or segment.get("camera"),
                      "sound": segment.get("sound") or segment.get("sfx")}]
     duration = segment.get("duration") or 5
-    target = "Seedance 2.0" if is_seedance_model(target_model) else "Kling"
-    lines = [
-        "%s 视频提示词：精准生成 %s 秒，画幅%s，电影级连续动作；不要静帧拼贴，不要把参考故事板整张图做平移缩放。"
-        % (target, _clean(duration), _clean(segment.get("ratio") or "")),
-        "成片媒介与风格：真实摄影、写实商业广告视频；故事板只是黑白素描预演，用于构图和动作顺序参考。绝不输出素描、铅笔画、炭笔画、黑白绘画、插画、动漫或故事板格子画面。",
-        "导演标注颜色系统仅供读取，不得画入成片：红色箭头=身体运动；蓝色箭头=摄像机运动；绿色标记=取景/构图笔记；橙色标记=灯光方向；紫色标记=声音/情感强调；黑色文本=简短镜头笔记和面板标签。请把这些标注转译为真实动作、机位、构图、灯光、声音和情绪，不要显示任何箭头、彩色线条、标记、黑色文字或面板标签。",
-    ]
-    # ── 连续性锁定（修复断层 + 服装漂移 + 音画不同步）──
+    is_kling = not is_seedance_model(target_model)
+
+    # ── 核心指令行：模型专属结构 ──
+    # Kling: 镜头语言优先（"Slow push-in from wide shot..."）
+    # Seedance: 主体行为优先（"A luxury perfume bottle rotates..."）
+    core = _build_core_instruction(segment, timeline, duration, is_kling)
+
+    # ── 故事板规则（storyboard_ref 时必须，之前已修复短路）──
+    storyboard_ref = bool(segment.get("storyboard_ref") or segment.get("storyboard_ref_mode"))
+    lines = []
+    if storyboard_ref:
+        lines.append(_storyboard_rules_block())
+
+    # ── 核心指令（含模型标识用于调试区分）──
+    model_label = "Kling" if is_kling else "Seedance 2.0"
+    lines.append("%s 视频提示词：%s" % (model_label, core))
+
+    # ── 连续性锁定（断层/服装/音画）──
     continuity_lines = _build_continuity_lock(segment)
     if continuity_lines:
         lines.extend(continuity_lines)
-    else:
-        lines.append(
-            "一致性锁定：人物脸部、发型、服装和体态保持完全一致；产品外观、颜色、材质、比例、结构和标识细节保持完全一致；场景光线和空间关系保持连续。")
-    for item in timeline:
-        action = _clean(item.get("action") or item.get("visual") or item.get("text") or "主体自然运动")
-        line = "%s-%s秒：%s。镜头%s。" % (
-            _clean(item.get("start", 0)), _clean(item.get("end", segment.get("duration", 5))),
-            action, _motion(item.get("camera") or item.get("movement")))
-        if item.get("sound") or item.get("sfx"):
-            line += "声音/情绪：%s。" % _clean(item.get("sound") or item.get("sfx"))
-        details = []
-        for key, label in (("shot_size", "景别"), ("angle_offset", "角度"),
-                           ("composition", "构图"), ("lighting", "灯光"),
-                           ("character_action", "人物动作"),
-                           ("micro_expression", "微表情"),
-                           ("scene_prompt", "场景"), ("prop_prompts", "道具/产品")):
-            value = item.get(key)
-            if isinstance(value, list):
-                value = "；".join(_clean(v) for v in value)
-            if value:
-                details.append("%s：%s" % (label, _clean(value)))
-        if details:
-            line += " " + "；".join(details) + "。"
-        lines.append(line)
+
+    # ── 音频契约（完整音频指令）──
+    audio = segment.get("audio_contract") or {}
+    if audio and audio.get("track") != "none":
+        audio_parts = []
+        if audio.get("dialogue"):
+            audio_parts.append("台词：%s" % _clean(audio["dialogue"]))
+        if audio.get("language"):
+            audio_parts.append("语言/口音：%s" % _clean(audio["language"]))
+        if audio.get("voice"):
+            audio_parts.append("声音人设：%s" % _clean(audio["voice"]))
+        if audio.get("bgm"):
+            audio_parts.append("背景音乐：%s" % _clean(audio["bgm"]))
+        if audio.get("sfx"):
+            audio_parts.append("音效：%s" % _clean(audio["sfx"]))
+        if audio.get("lip_sync"):
+            audio_parts.append("口型同步：必须")
+        if audio_parts:
+            lines.append("音频契约：%s。" % "；".join(audio_parts))
+
+    # ── 已确认渲染方案 ──
+    render_plan = (segment.get("render_plan") or {}).get("content") or {}
+    if render_plan:
+        lines.append("已确认渲染方案：%s。必须实际执行。" % json.dumps(
+            render_plan, ensure_ascii=False, sort_keys=True))
+
+    # ── 参考图标注（告诉模型每张图是什么）──
     refs = refs or segment.get("references") or segment.get("reference_roles") or []
     for i, ref in enumerate(refs, 1):
         if isinstance(ref, dict):
             lines.append(_reference_clause(ref, i))
-    contract = segment.get("clip_contract") or {}
-    buckets = contract.get("scopes") or contract.get("scope") or {}
-    if buckets:
-        lines.append("作用域规则：镜头/beat级动作、构图、产品和道具要求只适用于其标注时间窗；不得将单个镜头的姿势、道具或机位扩大到整段视频。")
-    scope = contract.get("scope") or {}
-    if scope.get("already_happened"):
-        lines.append("已经完成、不得重演：%s。" % "；".join(map(_clean, scope["already_happened"])))
-    if scope.get("this_clip_only"):
-        lines.append("本段只完成：%s。" % "；".join(map(_clean, scope["this_clip_only"])))
-    if scope.get("reserved_for_later"):
-        lines.append("留待后续、本段禁止提前出现：%s。" % "；".join(map(_clean, scope["reserved_for_later"])))
-    if scope.get("endpoint"):
-        lines.append("本段结束状态：%s。" % _clean(scope["endpoint"]))
-    clip_scope = buckets.get("clip") or {}
-    director_parts = []
-    for key, label in (("narrative_function", "叙事功能"), ("felt_intent", "观众感受目标"),
-                       ("director_voice", "导演语气"), ("arc_position", "叙事弧位置")):
-        if clip_scope.get(key):
-            director_parts.append("%s：%s" % (label, _clean(clip_scope[key])))
-    if director_parts:
-        lines.append("导演意图：%s。所有运镜、灯光、表演和声音必须服务同一个意图，避免空泛电影感。" % "；".join(director_parts))
-    if clip_scope.get("is_pattern_break"):
-        lines.append("本镜是有意的节奏破格点：只在本镜改变节奏或构图，不改变人物、产品和品牌世界的一致性。")
+
+    # ── 导演意图（叙事功能 + 观众感受）──
+    director = _build_director_intent(segment)
+    if director:
+        lines.append(director)
+
+    # ── 身份锁定 ──
     if segment.get("product_identity_lock"):
         lines.append("产品一致性锁：只允许展示参考产品本身，不添加、替换或重设计产品零件、材质、颜色和比例。")
     if segment.get("character_identity_lock"):
         lines.append("人物一致性锁：只允许使用参考人物本身，不改变脸型、发型、服装、年龄和身体比例。")
+
+    # ── 负向约束（最后）──
+    if negative:
+        lines.append("避免：%s。" % _clean(negative))
+    return "\n".join(lines)
+
+
+def _build_core_instruction(segment, timeline, duration, is_kling):
+    """Build the core instruction using model-specific structure.
+
+    Kling: camera-first (responds to specific cinematography terms)
+    Seedance: subject-first (responds to subject behavior descriptions)
+    Both: one clear moment, specific lighting, style anchor, structured details.
+    """
+    ratio = _clean(segment.get("ratio") or "9:16")
+    style = segment.get("style") or "photorealistic commercial"
+
+    # Extract the primary action from the first timeline beat
+    first_beat = timeline[0] if timeline else {}
+    action = _clean(first_beat.get("action") or first_beat.get("visual")
+                    or segment.get("visual") or segment.get("text") or "主体自然运动")
+    camera = _motion(first_beat.get("camera") or first_beat.get("movement")
+                     or segment.get("camera_movement") or segment.get("camera"))
+    lighting = _clean(first_beat.get("lighting") or segment.get("lighting") or "")
+    scene = _clean(first_beat.get("scene_prompt") or segment.get("scene_prompt") or "")
+
+    # Build the core instruction
+    parts = []
+    if is_kling:
+        # Kling: camera direction first
+        if camera and camera != "固定机位":
+            parts.append("%s，%s秒" % (camera, duration))
+        else:
+            parts.append("固定机位，%s秒" % duration)
+        parts.append(action)
+    else:
+        # Seedance: subject behavior first
+        parts.append(action)
+        if camera and camera != "固定机位":
+            parts.append("镜头%s" % camera)
+        parts.append("时长%s秒" % duration)
+
+    # Structured details from first beat (景别/构图/人物动作/微表情等)
+    details = []
+    for key, label in (("shot_size", "景别"), ("angle_offset", "角度"),
+                       ("composition", "构图"), ("lighting", "灯光"),
+                       ("character_action", "人物动作"),
+                       ("micro_expression", "微表情"),
+                       ("scene_prompt", "场景"), ("prop_prompts", "道具/产品")):
+        value = first_beat.get(key) or segment.get(key)
+        if isinstance(value, list):
+            value = "；".join(_clean(v) for v in value)
+        if value:
+            details.append("%s：%s" % (label, _clean(value)))
+    if details:
+        parts.append("；".join(details))
+
+    # Environment and lighting (if not already in details)
+    if scene and not any("场景" in d for d in details):
+        parts.append("场景：%s" % scene)
+    if lighting and not any("灯光" in d for d in details):
+        parts.append("灯光：%s" % lighting)
+
+    # Style anchor (1-2 strong, not 10 adjectives)
+    parts.append("风格：%s" % style)
+    parts.append("画幅：%s" % ratio)
+
+    # Additional timeline beats (if multi-beat)
+    if len(timeline) > 1:
+        beat_lines = []
+        for item in timeline[1:]:
+            beat_action = _clean(item.get("action") or item.get("visual") or "主体自然运动")
+            beat_camera = _motion(item.get("camera") or item.get("movement"))
+            beat_start = _clean(item.get("start", 0))
+            beat_end = _clean(item.get("end", duration))
+            beat_line = "%s-%s秒：%s" % (beat_start, beat_end, beat_action)
+            if beat_camera and beat_camera != "固定机位":
+                beat_line += "，镜头%s" % beat_camera
+            if item.get("sound") or item.get("sfx"):
+                beat_line += "，声音/情绪：%s" % _clean(item.get("sound") or item.get("sfx"))
+            beat_lines.append(beat_line)
+        if beat_lines:
+            parts.append("后续节奏：" + "；".join(beat_lines))
+
+    # First beat time range (always include for temporal structure)
+    first_start = _clean(first_beat.get("start", 0))
+    first_end = _clean(first_beat.get("end", duration))
+    time_range = "%s-%s秒" % (first_start, first_end)
+    if parts:
+        parts[0] = time_range + "：" + parts[0]
+
+    # Sound/SFX from first beat
+    if first_beat.get("sound") or first_beat.get("sfx"):
+        parts.append("声音/情绪：%s" % _clean(first_beat.get("sound") or first_beat.get("sfx")))
+
+    # Continuity endpoint
+    if segment.get("continuity_out"):
+        parts.append("衔接点：%s" % _clean(segment["continuity_out"]))
+
+    return "。".join(p for p in parts if p) + "。"
+
+
+def _storyboard_rules_block():
+    """Compact storyboard-to-video rules (always included when storyboard_ref=True)."""
+    return ("【故事板转视频规则】故事板是黑白素描预演，仅用于构图和动作顺序参考；"
+            "成片必须是真实摄影质感的彩色商业视频，绝不输出素描、铅笔画、炭笔画或故事板格子画面。"
+            "导演标注（红箭头=身体运动、蓝箭头=镜头运动、绿标记=构图、橙标记=灯光、紫标记=情绪）"
+            "必须读取并转译为真实运镜和动作，但绝不渲染标注本身。")
+
+
+def _build_director_intent(segment):
+    """Build director intent line from clip contract."""
+    contract = segment.get("clip_contract") or {}
+    clip_scope = (contract.get("scopes") or {}).get("clip") or {}
+    parts = []
+    for key, label in (("narrative_function", "叙事功能"), ("felt_intent", "观众感受目标"),
+                       ("director_voice", "导演语气"), ("arc_position", "叙事弧位置")):
+        if clip_scope.get(key):
+            parts.append("%s：%s" % (label, _clean(clip_scope[key])))
+    if not parts:
+        return None
+    return "导演意图：%s。所有运镜、灯光、表演和声音必须服务同一个意图。" % "；".join(parts)
     if segment.get("continuity_in"):
         lines.append("本段开头衔接：%s。" % _clean(segment["continuity_in"]))
     if segment.get("continuity_out"):
