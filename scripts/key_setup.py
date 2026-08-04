@@ -71,7 +71,13 @@ def ensure_session_id(host_session_id=None):
                 host = os.environ[variable]
                 break
         if not host:
-            host = runtime["name"] + ":" + secrets.token_urlsafe(24)
+            # Use project directory as stable host signal so that every
+            # command in the same project resolves to the same session ID.
+            # Previously used secrets.token_urlsafe(24) which generated a
+            # new random ID per shell, breaking save/load key pairing.
+            project_dir = os.path.dirname(os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "..")))
+            host = runtime["name"] + ":" + project_dir
     digest = hashlib.sha256(str(host).encode("utf-8")).hexdigest()[:32]
     value = "br-%s-%s" % (agent_runtime.detect_agent_runtime()["name"], digest)
     os.environ[SESSION_ENV] = value

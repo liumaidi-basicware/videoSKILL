@@ -154,17 +154,29 @@ def plan_fingerprint(plan):
     Callers may provide the authored, normalized, hydrated, or duration-
     partitioned representation. Canonicalization is idempotent, so every stage
     binds approval to the same semantic plan identity.
+
+    approved_prompt_zh is excluded: it is injected by prompt_review after the
+    plan is authored, and must not change the plan's identity (otherwise every
+    prompt review would silently create a new output directory).
     """
     plan = canonical_storyboard_plan(plan)
+    # Strip injected fields that are not part of the authored plan identity
+    for shot in (plan.get("shots") or []):
+        shot.pop("approved_prompt_zh", None)
     return hashlib.sha256(
         json.dumps(plan, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:12]
 
 
 def _digest_plan_for_prompt_review(plan):
-    """Use the same full-plan identity as prompt_review without importing it."""
-    return hashlib.sha256(json.dumps(plan, ensure_ascii=False, sort_keys=True,
-                                     separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
+    """Use the same full-plan identity as prompt_review without importing it.
+
+    prompt_review.polish stores storyboard.plan_fingerprint(plan) after
+    calling expand_product_sku_refs(canonical_storyboard_plan(plan)).
+    Mirror that exactly so the confirmation gate matches.
+    """
+    canonical = expand_product_sku_refs(canonical_storyboard_plan(plan))
+    return plan_fingerprint(canonical)
 
 
 def _load_prompt_review_for_shots(path, plan):
@@ -1133,6 +1145,16 @@ def needs_product_usage_image(plan):
 def product_usage_prompt(plan, shot=None, include_human=True):
     """Build the physical interaction lock for product-in-use reference imagery."""
     shot = shot or {}
+    # When called without a specific shot (board-level usage image), fall back
+    # to the most action-specific shot in the plan so the model focuses on the
+    # core interaction (e.g. magnetic snap-on) instead of generic posing.
+    if not (shot.get("character_action") or shot.get("action") or shot.get("visual")):
+        for candidate in (plan.get("shots") or []):
+            cand_action = (candidate.get("character_action") or
+                           candidate.get("action") or candidate.get("visual") or "")
+            if "磁吸" in cand_action or "吸附" in cand_action or "magnetic" in cand_action.lower():
+                shot = candidate
+                break
     facts = shot.get("product_facts") or plan.get("product_facts") or {}
     product_name = facts.get("product_name") or facts.get("product_type") or "the exact uploaded product"
     action = (shot.get("character_action") or shot.get("action") or shot.get("visual") or
@@ -1414,7 +1436,6 @@ def render_storyboard(plan_path, out_dir, model=DEFAULT_MODEL, run_id=None, flat
         print("[storyboard] 已将 %d 条文字/图形动效说明移到 motion_elements，" 
               "仅供底片生成后 HyperFrames 使用" % len(migrated_motion), flush=True)
     plan = expand_product_sku_refs(canonical_storyboard_plan(plan))
-    out_dir = resolve_run_output_dir(out_dir, plan, run_id=run_id, flat=flat)
     os.makedirs(out_dir, exist_ok=True)
     ratio = "16:9"
     if run_id and os.path.basename(out_dir) != safe_name(run_id):
@@ -1460,6 +1481,11 @@ def render_storyboard(plan_path, out_dir, model=DEFAULT_MODEL, run_id=None, flat
     # Collect/validate references before the user-prompt gate so diagnostics can
     # still show expanded SKU assets without allowing any model submission.
     _load_prompt_review_for_shots(prompt_review, plan)
+
+    # Resolve output dir AFTER prompt_review injects approved_prompt_zh, so the
+    # fingerprint compared against the previous run matches the stored one.
+    out_dir = resolve_run_output_dir(out_dir, plan, run_id=run_id, flat=flat)
+    os.makedirs(out_dir, exist_ok=True)
 
     from storyboard_validator import validate_plan
     validation = validate_plan(plan)

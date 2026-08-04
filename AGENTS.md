@@ -87,9 +87,11 @@
 12. **给客户看图/看片一律用绝对路径 + markdown（UX 铁律）**：客户 0 基础、只在对话框里看，纯文字路径他打不开也看不到。展示候选图/成片必须渲染出来：
     - 图片：`![描述](绝对路径)`；视频：`[描述](绝对路径)`。路径含中文/空格用尖括号包住 `![](<...>)`。
     - `asset_prep.py gen-image/refine-image` 返回的每版带 `abspath`；`video_engine.py --json` 成功结果带 `absPath`（batch 每段也有）——直接用这个绝对路径，别用相对 `output/...`（客户可能打不开）。
-    - 每个确认闸门（选图版本、脚本、成片）都要让客户**真正看到**内容再确认，不能只报路径就问「行不行」。
+    - 每个确认闸门（选图版本、脚本、成片）都要让客户**真正看到**内容再确认，不能只报路径就问「行不行」。**顺序铁律：先展示→等客户看完→再请求确认**。绝不能图片还没渲染出来就问「这样可以吗」。
+    - **视频生成前提示词确认（新增铁律）**：调用 `video_engine.py` 之前，必须把每段的完整提示词（`_submission_text` 编译结果）输出到对话中让客户确认。格式：「第N段提示词：...（完整文本）。确认后我开始生成。」绝不能不展示提示词就直接提交生成。
 13. **等待与耗时要给体感（UX 铁律）**：客户盯着不动的对话框会慌，任何 >10 秒的操作前先打招呼、给预期：
     - **出片/出图前**：先说一句「正在生成，大约需要 X（出图约 1 分钟内 / 单段视频 1–3 分钟 / 多段并行也≈单段时间），稍等一下～」再启动，别让对话框静默几分钟。
+    - **视频生成进度（新增铁律）**：视频生成期间**必须让客户看到实时进度**。不要用 `| tail -5` 或 `| tail -20` 管道隐藏中间日志——这会导致客户长时间看不到任何输出。正确做法：让 video_engine 的 verbose 日志直接输出到对话（`verbose=True`），或定期检查 manifest/输出目录并汇报进度（「已完成 2/4 段，预计还需 3 分钟」）。
     - **首次自举环境**（装 Node/Chromium 可能 5–10 分钟）：明确告诉客户「首次使用要下载一些组件，大约 5–10 分钟，只这一次，之后就快了」，别只说「请稍等」就沉默。
     - 多步流程（分镜→出图→出片→拼接）开始前，用一句话讲清「接下来我会做 A→B→C，中间会让你确认几次」，让客户有全局预期。
 14. **错误说人话，不甩技术术语（UX 铁律）**：脚本报错时**翻译成客户能懂的话 + 下一步怎么办**，绝不把 `BRRateLimited`/`HTTP 429`/`traceback` 原样丢给客户：
@@ -169,6 +171,20 @@
 - `scripts/final_edit.py` — **阶段7本地剪辑**：`run --scheme remotion_scheme.json --basecut basecut.mp4 --out final.mp4`（或 compile/render 分步）。方案命令→Remotion shotlist：底片作背景视频层，camera_move→运镜、motion_overlay→动效字幕/图形。**关键：渲染前自动把本地媒体拷进 `remotion_engine/public/` 并改相对路径**，绕过 Remotion 对 `<Video>` 的 `file://` 安全拦截（MEDIA_ELEMENT_ERROR code 4）。本地渲染零 Credit。
 - `scripts/text_anim.py` — 动态文字**兜底**引擎（本地 ffmpeg libass）。**仅当 `hf_engine.py doctor` 报缺 Node 时**才用（会丢高级动效、可能中文乱码）。scenes JSON 与 hf_engine 通用
 - 图片引用：本地图无需图床，`br_client.to_image_ref()` 自动转 base64 data URL 传 API（已实测支持）
+
+## 视频模型参数速查（BasicRouter /v1/video-generations）
+
+| 模型 | 时长上限 | 支持 videoType | 参考图上限 | 适用场景 |
+|------|---------|---------------|-----------|---------|
+| seedance-2.0 | 15s | 1,2,3,5 | 4 张 | 主力：文生/首帧/首尾帧/多主体 |
+| kling-v3-omni-video | 10s | 1,2,3,4,5 | 4 张 | 人物锚定(type4)、隐私回退 |
+| wan2.7-i2v | 5s | 1,2 | 2 张 | 快速预览、低成本 |
+| dreamina-seedance | 15s | 1,2,3,5 | 4 张 | seedance 降级备选 |
+
+**videoType 含义**：1=文生视频、2=首帧图生、3=首尾帧、4=单图人物锚定、5=多图多主体。
+**时长拆分**：`script_splitter.split()` 按目标模型的 `videoDurationMax` 自动拆分，不再固定 15s。kling=10s、wan=5s。
+**延长链**：口播场景 >15s 时，后续段用 `extend_from_previous=True`（模型延长）；非口播场景用本地 ffmpeg 拼接（`compose.concat --transition xfade`）。
+**故事板提示词关联**：`prompt_review.polish(plan, "storyboard")` 的 `approved_prompt_zh` 直接作为视频生成 prompt（`_submission_text` 第一优先级），确保故事板确认的内容就是视频生成的内容。
 
 ## 铁律补充 · 脚本要接地
 

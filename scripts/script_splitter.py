@@ -494,6 +494,10 @@ def split(plan, storyboard_dir=None, fps=30, min_seconds=3, bw_storyboard=None,
         raise ValueError("CLIENT_REQUIRED: split 正式流程必须显式指定 client")
     import storyboard
     plan = storyboard.expand_product_sku_refs(storyboard.canonical_storyboard_plan(plan))
+    # Resolve target model's duration limit early — used by oral broadcast
+    # validation and shot partitioning below.
+    target_model = plan.get("model") or plan.get("video_model")
+    max_secs = max_seconds_for_model(target_model)
     scene_type = str(
         plan.get("scene_type") or plan.get("sceneType") or plan.get("scenario") or plan.get("workflow") or
         plan.get("skill") or plan.get("command") or ""
@@ -507,8 +511,9 @@ def split(plan, storyboard_dir=None, fps=30, min_seconds=3, bw_storyboard=None,
             raise ValueError("ORAL_BROADCAST_SHOTS_REQUIRED: 口播延长链至少需要两个独立镜头")
         total_authored = sum(_shot_duration_seconds(shot, min_seconds)
                              for shot in authored_shots)
-        if total_authored > SEEDANCE_MAX_SECONDS * len(authored_shots):
-            raise ValueError("ORAL_BROADCAST_DURATION_INVALID: 每个口播镜头必须不超过15秒")
+        if total_authored > max_secs * len(authored_shots):
+            raise ValueError("ORAL_BROADCAST_DURATION_INVALID: 每个口播镜头必须不超过%ds（当前模型上限）"
+                             % max_secs)
     # Video extension is an explicit business policy, not a generic same-scene
     # continuity shortcut. Only the single-speaker oral-broadcast workflow may
     # submit a provider extension request; every other workflow must use fresh
@@ -539,8 +544,7 @@ def split(plan, storyboard_dir=None, fps=30, min_seconds=3, bw_storyboard=None,
     aspect = ratio_override or output_ratio(plan)
     ratio, resolution = _RATIO_MAP.get(aspect, ("9:16", "1080p"))
     plan_refs = plan.get("asset_refs") or {}
-    # Seedance accepts at most 15 seconds per generation. Group the approved
-    # shots into the same <=15s units that the storyboard stage previews.
+    # max_secs already resolved above (line ~500) from the target model.
     source_shots = plan.get("shots") or []
     scene_aware = any(str(shot.get("scene_id") or "").strip() for shot in source_shots)
 
@@ -548,7 +552,7 @@ def split(plan, storyboard_dir=None, fps=30, min_seconds=3, bw_storyboard=None,
     if scene_aware:
         _check_scene_consistency(source_shots)
 
-    shots = partition_shots(source_shots, max_seconds=SEEDANCE_MAX_SECONDS,
+    shots = partition_shots(source_shots, max_seconds=max_secs,
                             scene_aware="auto", preserve_shots=oral_broadcast)
     if not shots:
         raise ValueError("storyboard_plan 无 shots，无法拆分")
@@ -567,7 +571,7 @@ def split(plan, storyboard_dir=None, fps=30, min_seconds=3, bw_storyboard=None,
         float(shot.get("duration") or shot.get("seconds") or min_seconds)
         for shot in (plan.get("shots") or [])
     )
-    long_video = total_plan_seconds > SEEDANCE_MAX_SECONDS
+    long_video = total_plan_seconds > max_secs
 
     import asset_prep as asset_prep
 

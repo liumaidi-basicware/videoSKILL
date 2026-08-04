@@ -76,8 +76,28 @@ def build_prompt_requests(plan, stage):
             for i, shot in enumerate(shots)]
 
 
+# Text models suitable for prompt polishing (LLM-based text generation).
+# Image/video models like gpt-image-2 must NOT be passed here.
+_TEXT_MODEL_HINTS = ("qwen", "gpt-4", "gpt-3", "claude", "kimi", "deepseek",
+                     "gemini", "llama", "mistral", "yi", "chatglm", "moonshot")
+_IMAGE_MODEL_HINTS = ("image", "dall", "flux", "stable", "midjourney",
+                      "seedream", "imagen", "banana")
+
+
+def _validate_text_model(model):
+    """Ensure the polish model is a text/LLM model, not an image/video model."""
+    lower = str(model or "").lower()
+    for hint in _IMAGE_MODEL_HINTS:
+        if hint in lower:
+            raise ValueError(
+                "PROMPT_REVIEW_MODEL_INVALID: '%s' 是图像/视频模型，prompt_review "
+                "需要文字模型（如 qwen3.6-plus、gpt-4o、kimi-k3）" % model)
+    return True
+
+
 def polish(plan, stage, api_key=None, model="qwen3.6-plus"):
     key_setup.ensure_session_id()
+    _validate_text_model(model)
     api_key = api_key or key_setup.load_key()
     if not api_key:
         raise ValueError("PROMPT_REVIEW_KEY_REQUIRED")
@@ -87,8 +107,9 @@ def polish(plan, stage, api_key=None, model="qwen3.6-plus"):
               "所有生成模型画面禁止字幕、口号、标签、Logo和水印。必须严格返回 JSON。")
     polished = []
     for item in build_prompt_requests(plan, stage):
-        response = br_client.chat(api_key, item["source_prompt_zh"], system_prompt=system,
-                                  model=model, timeout=600)
+        messages = [{"role": "system", "content": system},
+                    {"role": "user", "content": item["source_prompt_zh"]}]
+        response = br_client.chat(api_key, messages, model=model, timeout=600)
         result = _extract_json(response)
         result.update({"shot_id": item["shot_id"], "stage": stage,
                        "source_prompt_zh": item["source_prompt_zh"]})
