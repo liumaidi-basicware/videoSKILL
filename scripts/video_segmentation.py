@@ -5,19 +5,46 @@ from copy import deepcopy
 SEEDANCE_MAX_SECONDS = 15
 
 # Per-model maximum generation duration (seconds).
-# Used when the target model is known; falls back to SEEDANCE_MAX_SECONDS.
+# Verified against BasicRouter /v1/video-models API on 2026-08-04.
+# br_client.create_video() validates duration against the API at runtime;
+# these values are for pre-splitting in script_splitter.split().
 MODEL_MAX_SECONDS = {
+    # Seedance family (via Dreamina endpoint)
+    "dreamina-seedance-2-0-260128": 15,
+    "dreamina-seedance-2-0-fast-260128": 15,
+    "dreamina-seedance-2-5-260628": 30,  # offline as of 2026-08-04
+    "seedance-1-5-pro-251215": 12,
+    # Kling
+    "kling-v3-omni": 15,
+    "kling-v3": 15,  # offline as of 2026-08-04
+    "kling-avatar-image2video": 15,  # offline as of 2026-08-04
+    # Wan family
+    "wan2.7-i2v": 15,
+    "wan2.6-t2v": 15,
+    "wan2.6-i2v-flash": 15,
+    "wan2.6-r2v-flash": 15,
+    "wan2.5-i2v-preview": 12,
+    # HappyHorse
+    "happyhorse-1.0-t2v": 15,
+    "happyhorse-1.0-i2v": 15,
+    "happyhorse-1.0-r2v": 15,
+    # Google Veo
+    "veo-3.1-generate-001": 8,
+    "veo-3.1-lite-generate-001": 8,
+    # Legacy aliases (mapped by br_client._legacy_video_model_candidates)
     "seedance-2.0": 15,
     "seedance-2.0-fast": 15,
-    "seedance-2.0-white": 15,
-    "kling-v3-omni-video": 10,
-    "kling-v3-omni": 10,
-    "wan2.7-i2v": 5,
+    "kling-v3-omni-video": 15,
 }
 
 
 def max_seconds_for_model(model=None):
-    """Return the max generation duration for the given model."""
+    """Return the max generation duration for the given model.
+
+    Uses the actual API modelId when available; falls back to SEEDANCE_MAX_SECONDS.
+    br_client.create_video() performs the authoritative runtime validation
+    against the gateway's videoDurationMax field.
+    """
     if model:
         return MODEL_MAX_SECONDS.get(str(model).lower(), SEEDANCE_MAX_SECONDS)
     return SEEDANCE_MAX_SECONDS

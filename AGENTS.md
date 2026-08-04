@@ -172,17 +172,27 @@
 - `scripts/text_anim.py` — 动态文字**兜底**引擎（本地 ffmpeg libass）。**仅当 `hf_engine.py doctor` 报缺 Node 时**才用（会丢高级动效、可能中文乱码）。scenes JSON 与 hf_engine 通用
 - 图片引用：本地图无需图床，`br_client.to_image_ref()` 自动转 base64 data URL 传 API（已实测支持）
 
-## 视频模型参数速查（BasicRouter /v1/video-generations）
+## 视频模型参数速查（BasicRouter /v1/video-models 实测 2026-08-04）
 
-| 模型 | 时长上限 | 支持 videoType | 参考图上限 | 适用场景 |
-|------|---------|---------------|-----------|---------|
-| seedance-2.0 | 15s | 1,2,3,5 | 4 张 | 主力：文生/首帧/首尾帧/多主体 |
-| kling-v3-omni-video | 10s | 1,2,3,4,5 | 4 张 | 人物锚定(type4)、隐私回退 |
-| wan2.7-i2v | 5s | 1,2 | 2 张 | 快速预览、低成本 |
-| dreamina-seedance | 15s | 1,2,3,5 | 4 张 | seedance 降级备选 |
+| 模型 modelId | 时长 | videoType | 分辨率 | 比例 | 适用场景 |
+|-------------|------|-----------|--------|------|---------|
+| dreamina-seedance-2-0-260128 | 4-15s | 1,2,3,5 | 480p-4k | 16:9/9:16/1:1/4:3/3:4/21:9 | **主力**：文生/首帧/首尾帧/多主体 |
+| dreamina-seedance-2-0-fast-260128 | 4-15s | 1,2,3,5 | 480p/720p | 同上 | 快速版（分辨率较低） |
+| kling-v3-omni | 3-15s | 1,2,3,4,5 | 720p-4k | 16:9/9:16/1:1 | **人物锚定(type4)**、隐私回退 |
+| seedance-1-5-pro-251215 | 4-12s | 1,2,3 | 720p/1080p | 16:9/9:16/1:1/4:3/3:4 | 旧版 seedance |
+| wan2.7-i2v | 4-15s | 2 | 720p/1080p | 16:9/9:16/1:1/4:3/3:4 | 首帧图生 |
+| wan2.6-t2v | 2-15s | 1 | 720p/1080p | 同上 | 文生视频 |
+| happyhorse-1.0-t2v | 3-15s | 1 | 720p/1080p | 同上 | 文生视频备选 |
+| happyhorse-1.0-i2v | 4-15s | 2 | 720p/1080p | 同上 | 首帧图生备选 |
+| happyhorse-1.0-r2v | 4-15s | 4 | 720p/1080p | 同上 | 人物锚定备选 |
+| veo-3.1-generate-001 | 4-8s | 1,2 | 720p/1080p/4k | 16:9/9:16 | Google Veo（短片段） |
+| veo-3.1-lite-generate-001 | 固定8s | 1,2 | 720p/1080p | 16:9/9:16 | Veo Lite（固定8s） |
+
+> **注意**：`seedance-2.0` 和 `kling-v3-omni-video` 是别名，实际 API modelId 是 `dreamina-seedance-2-0-260128` 和 `kling-v3-omni`。`br_client` 会自动映射。
+> **离线模型**：`kling-v3`、`kling-avatar-image2video`、`gemini-omni-flash-preview`、`dreamina-seedance-2-5-260628`（30s 上限但当前离线）。
 
 **videoType 含义**：1=文生视频、2=首帧图生、3=首尾帧、4=单图人物锚定、5=多图多主体。
-**时长拆分**：`script_splitter.split()` 按目标模型的 `videoDurationMax` 自动拆分，不再固定 15s。kling=10s、wan=5s。
+**时长拆分**：`script_splitter.split()` 按目标模型的 `videoDurationMax` 自动拆分。API 运行时 `br_client.create_video()` 会二次校验。
 **延长链**：口播场景 >15s 时，后续段用 `extend_from_previous=True`（模型延长）；非口播场景用本地 ffmpeg 拼接（`compose.concat --transition xfade`）。
 **故事板提示词关联**：`prompt_review.polish(plan, "storyboard")` 的 `approved_prompt_zh` 直接作为视频生成 prompt（`_submission_text` 第一优先级），确保故事板确认的内容就是视频生成的内容。
 
