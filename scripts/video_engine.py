@@ -591,9 +591,20 @@ def _privacy_fallback_allowed(model, video_type, ref_urls, allow_fallback=True):
 
 
 def _submission_text(segment, model, storyboard_ref=False, extend_url=None):
-    """Compile from original segment for the target model, never from another model's prompt."""
-    text = segment.get("approved_prompt_zh") or _storyboard_video_text(
-        _compile_seedance_text(segment, model), storyboard_ref)
+    """Compile from original segment for the target model, never from another model's prompt.
+
+    storyboard_ref=True 时，STORYBOARD_VIDEO_RULES 必须始终存在——即使
+    approved_prompt_zh 已由 prompt_review 确认。否则模型会把故事板的
+    素描风格/网格布局当作画面内容渲染进成片（真实故障模式）。
+    """
+    base_text = segment.get("approved_prompt_zh") or _compile_seedance_text(segment, model)
+    if storyboard_ref:
+        # Always prepend storyboard rules, even when approved_prompt_zh exists.
+        # The rules contain critical "NEVER render as sketch" and "Do NOT treat
+        # grid as video frame" instructions that must not be bypassed.
+        text = STORYBOARD_VIDEO_RULES + "\n\n【本段台词/剧情】\n" + base_text
+    else:
+        text = base_text
     if not segment.get("seedance_native", True):
         audio = segment.get("audio_contract") or {}
         render_plan = (segment.get("render_plan") or {}).get("content") or {}
