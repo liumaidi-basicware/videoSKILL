@@ -1,4 +1,19 @@
-# AI 营销数字员工 · 通用 Agent 交付与使用说明
+# AI 营销视频工作室
+
+> **你出创意，我出成片。** 从一句话需求到可发布的营销视频，全程引导式完成。
+
+## 文档导航
+
+| 你是谁 | 看这个 |
+|--------|--------|
+| **我是客户，想做视频** | [CUSTOMER_GUIDE.md](CUSTOMER_GUIDE.md) — 客户使用指南 |
+| **我是交付人员** | [DELIVERY_CHECKLIST.md](DELIVERY_CHECKLIST.md) — 交付检查清单 |
+| **我是技术负责人** | [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) — 项目概览 |
+| **我是开发者** | 继续往下读本文档 |
+
+---
+
+## 开发者文档
 
 > **使用前先解压：** 不要直接把 zip 当作工作目录。请先解压，再用 Kilo、Codex、Hermes 或其他兼容 Agent 打开 `marketing-video-agent/` 文件夹。Codex Desktop 的专用操作见 `START_HERE_CODEX_DESKTOP.md`，该文档只是宿主适配说明，不代表公共流程依赖 Codex。
 >
