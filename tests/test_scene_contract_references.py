@@ -53,7 +53,10 @@ class SceneContractReferenceTests(unittest.TestCase):
              {"label": "分镜", "type": "storyboard_composition", "scope": "beat"}],
         )
         self.assertIn("不要复制参考图背景、姿势、构图或光线", prompt)
-        self.assertIn("绝不继承黑白、素描、网格、箭头、文字", prompt)
+        # Storyboard reference must instruct the model to READ annotations as
+        # motion guidance while NOT rendering them visually.
+        self.assertIn("读取导演标注作为运动指导", prompt)
+        self.assertIn("绝不在成片中渲染标注本身", prompt)
         self.assertIn("不得扩大到其他镜头", prompt)
 
 

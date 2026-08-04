@@ -537,12 +537,19 @@ The storyboard is a monochrome pencil/charcoal PREVIS for composition only, not 
 The generated video MUST be photorealistic live-action / realistic commercial footage with natural skin,
 real materials, real lighting and believable product scale. NEVER render the video as a sketch, pencil drawing,
 charcoal drawing, illustration, monochrome storyboard, comic, anime or contact sheet.
-【导演标注颜色系统：只读取语义，不渲染标注】
-Interpret the storyboard annotations as director metadata while planning motion:
-RED arrows = body / subject movement; BLUE arrows = camera movement;
-GREEN marks = framing and composition notes; ORANGE marks = lighting direction;
-PURPLE marks = sound and emotional emphasis; BLACK text = short shot notes and panel labels.
-Use these annotations to guide the corresponding live-action movement, framing, lighting, sound and emotion.
+【导演标注颜色系统：必须读取并执行，但绝不渲染标注本身】
+The storyboard contains director annotation marks. You MUST read each annotation and translate it into
+the corresponding live-action camera movement, body motion, lighting change, or emotional beat:
+RED arrows = body / subject movement direction and intensity. Follow the arrow direction for subject motion.
+A red arrow pointing left means the subject moves left; a curved red arrow means the subject rotates.
+BLUE arrows = camera movement direction and speed. Follow the blue arrow for camera motion.
+A blue arrow pushing in means dolly/push in; a blue arc means orbit/pan; a blue arrow pulling back means pull out.
+GREEN marks = framing and composition notes. Use these to determine shot size, angle, and subject placement.
+ORANGE marks = lighting direction and quality. Use these to determine where light comes from and its intensity.
+PURPLE marks = sound and emotional emphasis. Use these to time the emotional peak and sync with dialogue delivery.
+BLACK text = short shot notes and panel labels. Use these as beat timing and transition cues.
+These annotations are MANDATORY motion/framing/lighting instructions, not optional suggestions.
+Every annotation must be reflected in the generated video's actual camera work and subject movement.
 Do NOT render any arrows, colored marks, annotation strokes, panel labels or storyboard notes in the final video.
 Strictly keep the character / product / scene / lighting / story order consistent.
 Do NOT animate the whole 12-panel image as a single flat picture.
@@ -775,9 +782,11 @@ def _fallback_metadata(initial_model, model, reason=None):
 def _storyboard_negative(base):
     extra = ("12格故事板整图动画, 把12格当成一张图平移缩放, 分屏拼贴成片, "
              "素描风格, 铅笔画, 炭笔画, 黑白绘画, 插画, 动漫, 新增角色, 换装, "
-             "换场景, 改产品外观, 改剧情顺序, 彩色导演箭头, 红色箭头, 蓝色箭头, "
-             "绿色构图标记, 橙色灯光标记, 紫色声音标记, 黑色镜头笔记, 面板标签, "
-             "故事板标注, 手写批注")
+             "换场景, 改产品外观, 改剧情顺序, "
+             "红色箭头, 蓝色箭头, 绿色构图标记, 橙色灯光标记, 紫色声音标记, "
+             "黑色镜头笔记, 彩色箭头, 箭头标注, 手写批注, 导演标注, 面板标签, "
+             "故事板标注, contact sheet, storyboard grid, panel border, "
+             "annotation marks, pencil sketch overlay, charcoal drawing effect")
     if not base:
         return extra
     return base + ", " + extra
