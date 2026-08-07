@@ -600,15 +600,35 @@ def add_output(manifest, path, kind="file"):
     return manifest
 
 
-def task_key(stage, unit_id, handoff_fingerprint, attempt=1):
-    return "%s:%s:%s:%s" % (stage, unit_id, handoff_fingerprint, attempt)
+def _normalize_model_name(model):
+    if model is None:
+        return None
+    value = str(model).strip()
+    return value or None
+
+
+def task_model_matches(task, model):
+    requested = _normalize_model_name(model)
+    if not requested:
+        return True
+    return _normalize_model_name((task or {}).get("model")) == requested
+
+
+def task_key(stage, unit_id, handoff_fingerprint, attempt=1, model=None):
+    key = "%s:%s:%s:%s" % (stage, unit_id, handoff_fingerprint, attempt)
+    if stage == "video":
+        normalized_model = _normalize_model_name(model)
+        if normalized_model:
+            key += ":%s" % normalized_model
+    return key
 
 
 def upsert_task(manifest, task):
     task = dict(task)
     key = task.get("task_key") or task_key(
         task.get("stage", "video"), task.get("unit_id"),
-        task.get("handoff_fingerprint"), task.get("attempt", 1))
+        task.get("handoff_fingerprint"), task.get("attempt", 1),
+        task.get("model") if task.get("stage", "video") == "video" else None)
     task["task_key"] = key
     task["updated_at"] = datetime.now().isoformat(timespec="seconds")
     tasks = manifest.setdefault("tasks", [])
@@ -620,22 +640,24 @@ def upsert_task(manifest, task):
     return task
 
 
-def find_resumable_task(manifest, stage, unit_id, handoff_fingerprint):
+def find_resumable_task(manifest, stage, unit_id, handoff_fingerprint, model=None):
     attempt = current_video_attempt(manifest, unit_id) if stage == "video" else None
     candidates = [task for task in manifest.get("tasks", [])
                   if task.get("stage") == stage and task.get("unit_id") == unit_id
                   and task.get("handoff_fingerprint") == handoff_fingerprint
+                   and task_model_matches(task, model)
                    and task.get("status") in ("submitted", "running", "timed_out")
                    and (attempt is None or int(task.get("attempt", 1)) == attempt)
                   and task.get("task_id")]
     return candidates[-1] if candidates else None
 
 
-def find_submission_intent(manifest, stage, unit_id, handoff_fingerprint):
+def find_submission_intent(manifest, stage, unit_id, handoff_fingerprint, model=None):
     attempt = current_video_attempt(manifest, unit_id) if stage == "video" else None
     candidates = [task for task in manifest.get("tasks", [])
                   if task.get("stage") == stage and task.get("unit_id") == unit_id
                   and task.get("handoff_fingerprint") == handoff_fingerprint
+                   and task_model_matches(task, model)
                    and task.get("status") == "submitting"
                    and (attempt is None or int(task.get("attempt", 1)) == attempt)
                   and task.get("request_id")]
