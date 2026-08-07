@@ -72,6 +72,33 @@ class StrictStoryboardHandoffTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "STORYBOARD_APPROVAL_REQUIRED"):
                 ss.split(plan, storyboard_dir=root, client="acme")
 
+    def test_dialogue_only_revision_still_requires_existing_storyboard_approval(self):
+        plan = {"client": "acme", "project_title": "Demo",
+                "shots": [{"id": "s1", "duration": 3, "visual": "产品特写",
+                           "dialogue": "旧台词", "ref_tags": []}]}
+        revised = json.loads(json.dumps(plan, ensure_ascii=False))
+        revised["shots"][0]["dialogue"] = "新台词"
+        with tempfile.TemporaryDirectory() as root:
+            canonical = storyboard.canonical_storyboard_plan(plan)
+            image = os.path.join(root, "board.jpg")
+            with open(image, "wb") as handle:
+                handle.write(b"board")
+            result_path = os.path.join(root, "storyboard_result.json")
+            with open(result_path, "w", encoding="utf-8") as handle:
+                json.dump({
+                    "client": "acme", "run_id": "run-1", "out_dir": root,
+                    "plan_fingerprint": storyboard.plan_fingerprint(plan),
+                    "shots": [{
+                        "shot": canonical["shots"][0], "abspath": image,
+                        "path": image, "url": "https://cdn.example/s1.png",
+                        "sha256": storyboard._file_sha256(image),
+                        "shot_fingerprint": storyboard.shot_fingerprint(canonical["shots"][0]),
+                    }],
+                }, handle, ensure_ascii=False)
+            with self.assertRaisesRegex(ValueError, "STORYBOARD_APPROVAL_REQUIRED"):
+                ss.split(revised, storyboard_dir=root, client="acme",
+                         allow_text2video=True)
+
     def test_runtime_storyboard_enrichment_does_not_make_source_stale(self):
         source = {"id": "s1", "duration": 3, "visual": "产品特写",
                   "characters": [], "ref_tags": ["@product"]}

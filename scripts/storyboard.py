@@ -54,6 +54,7 @@ Outputs:
   output/storyboard/<run-id>/storyboard_result.json      # machine-readable result
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import hashlib
 import json
@@ -61,7 +62,9 @@ import math
 import os
 import re
 import shutil
+import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -338,10 +341,12 @@ def _digest_visual_plan_for_review(plan):
 def _load_prompt_review_for_shots(path, plan):
     if not path:
         raise br_client.BRError(
-            "PROMPT_REVIEW_REQUIRED: 正式生图前必须先生成并确认中文提示词审核文件。")
+            "PROMPT_REVIEW_REQUIRED: 正式生图前必须先生成并确认中文提示词审核文件；"
+            "请将 --prompt-review 指向审核文件，或把 storyboard_prompt_review.json 放在计划文件同目录。")
     if not os.path.isfile(path):
         raise br_client.BRError(
-            "PROMPT_REVIEW_REQUIRED: 中文提示词审核文件不存在，请先运行 prompt_review.py polish。")
+            "PROMPT_REVIEW_REQUIRED: 中文提示词审核文件不存在：%s；"
+            "请先运行 prompt_review.py polish 并 confirm。" % path)
     with open(path, encoding="utf-8") as handle:
         review = json.load(handle)
     if review.get("status") != "confirmed":
@@ -471,6 +476,8 @@ def canonical_storyboard_plan(plan):
     # can identify it without relying on filename order or a separate timeline.
     for index, shot in enumerate(canonical["shots"], 1):
         shot["panel_index"] = index
+    canonicalize_usage_ref_tags(canonical)
+    _sync_usage_reference_contract(canonical)
     return canonical
 
 
@@ -651,6 +658,10 @@ def download_first_image(api_key, prompt, out_path, *, model=DEFAULT_MODEL,
                     "request_id": request_id, "sha256": _file_sha256(out_path)}
         except Exception as exc:
             last_error = exc
+            if br_client.is_insufficient_credit(exc):
+                # Billing exhaustion is terminal for this invocation. Retrying
+                # it nine times only delays the actionable recharge message.
+                raise
             if result_url:
                 # The paid task has already succeeded. Never submit another task
                 # merely because the local download exhausted its own retries.
@@ -666,6 +677,154 @@ def download_first_image(api_key, prompt, out_path, *, model=DEFAULT_MODEL,
                       (delay, exc), flush=True)
                 time.sleep(delay)
     raise last_error
+
+
+def _usage_panel_goals(relation=None):
+    """Return explicit, single-frame proof goals for a usage board.
+
+    The model is asked for one frame at a time. Keeping these goals structured
+    prevents a contact-sheet model from borrowing the receiver edge or another
+    panel's action as the apparent contact surface.
+    """
+    relation = relation or {}
+    product_surface = relation.get("product_contact_surface") or "specified product contact surface"
+    receiver_surface = relation.get("receiver_contact_surface") or "specified receiver contact surface"
+    receiver = relation.get("receiver_object") or "receiver object"
+    outward = relation.get("outward_surface") or "specified outward product surface"
+    return [
+        "Show the product and %s separated, with the %s and the %s broad receiving plane both visible." %
+        (receiver, product_surface, receiver_surface),
+        "Show a hand aligning the product's %s directly toward the %s; show the receiver plane, never only its edge." %
+        (product_surface, receiver_surface),
+        "Show a three-quarter view immediately before contact: the broad %s faces the product contact surface; the receiver edge is secondary and cannot be the target." % receiver_surface,
+        "Show the attached result from the side and rear three-quarter view: the product contact surface is flush against the broad %s, with a visible contact line and the product protruding outward." % receiver_surface,
+        "Show the real use result after attachment: the receiver is in the specified usable orientation and the product remains a complete unchanged object, with both contact surfaces inferable.",
+        "Show a macro crop of the actual contact line between %s and %s; do not show a decorative seam or a receiver edge as a substitute." % (product_surface, receiver_surface),
+        "Show the product's %s facing outward toward camera while the receiver's %s is visibly behind it; never attach to the receiver display/front, side edge or top edge." % (outward, receiver_surface),
+        "Show a stable final action result from a different angle, preserving the same product volume, contact plane and receiver plane; no standing-on or resting-on interpretation.",
+        "Show a wider context of the same final attachment/use relation, without changing the receiver orientation or turning the product into a support object.",
+    ]
+
+
+def product_usage_panel_prompt(plan, shot, panel_index, include_human=True):
+    """Build the prompt for exactly one product-use proof frame."""
+    relation = product_usage_physical_relation(plan, shot)
+    facts = _plan_product_facts(plan, shot)
+    product_name = facts.get("product_name") or facts.get("product_type") or "the exact confirmed product"
+    goal = _usage_panel_goals(relation)[int(panel_index) - 1]
+    identity = _product_identity_lock(facts)
+    relation_lock = _physical_relation_lock(plan, shot)
+    surface_lock = _surface_attachment_lock(relation)
+    human = (
+        "Use the confirmed digital-human board only for cropped hands; do not invent a different face, outfit or person. "
+        if not include_human else
+        "If a person is needed, use the confirmed digital-human identity; hands must interact naturally and never cover the contact proof. "
+    )
+    return (
+        "Create ONE clean 16:9 commercial product-use frame, not a contact sheet, not a collage, not a split screen, and no borders or panel labels. "
+        "This is panel %d of 9, but render only this panel's single full-frame proof. "
+        "One frame means one continuous camera view, one composition, one smartphone and one speaker; do not show a sequence, contact sheet, storyboard, split view, duplicate object or multiple thumbnails. "
+        "Attached references are single-view identity anchors only; never reproduce any reference-board grid or multi-view layout. "
+        "The active product is %s. %s "
+        "%s "
+        "Required proof for this frame: %s "
+        "Do not invent extra products, packaging, accessories, text, captions, logos or watermarks. "
+        "Preserve the exact uploaded product geometry, complete 3D volume, thickness, edge profile, curvature, seams, controls, openings, markings and material. "
+        "Occlusion or contact must not flatten, cut, stretch, round off or redesign the product. "
+        "If the required contact plane is not clearly visible, the frame is invalid; do not hide it behind the phone edge or screen. "
+        "Use the same clean bright commercial lighting and neutral lifestyle setting across all panels."
+        % (int(panel_index), product_name, identity, human, goal)
+        + relation_lock + surface_lock
+    )
+
+
+def _ffmpeg_for_storyboard():
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        return ffmpeg
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
+def _compose_usage_panels(panel_paths, out_path, width=960, height=540):
+    """Compose nine independently generated frames locally with ffmpeg."""
+    if len(panel_paths) != 9:
+        raise br_client.BRError("USAGE_PANEL_COUNT_INVALID: expected 9, got %s" % len(panel_paths))
+    ffmpeg = _ffmpeg_for_storyboard()
+    if not ffmpeg:
+        raise br_client.BRError("USAGE_PANEL_COMPOSE_FFMPEG_MISSING: 请先准备 ffmpeg。")
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error"]
+    for path in panel_paths:
+        cmd.extend(["-i", os.path.abspath(path)])
+    filters = []
+    for index in range(9):
+        filters.append(
+            "[%d:v]scale=%d:%d:force_original_aspect_ratio=decrease,"
+            "pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=white,setsar=1[v%d]" %
+            (index, width, height, width, height, index))
+    layout = "|".join(
+        "%d_%d" % ((index % 3) * width, (index // 3) * height)
+        for index in range(9))
+    filters.append("".join("[v%d]" % index for index in range(9)) +
+                   "xstack=inputs=9:layout=%s:fill=white[out]" % layout)
+    cmd.extend(["-filter_complex", ";".join(filters), "-map", "[out]",
+                "-frames:v", "1", "-q:v", "2", os.path.abspath(out_path)])
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.returncode != 0 or not os.path.isfile(out_path):
+        raise br_client.BRError("USAGE_PANEL_COMPOSE_FAILED: %s" %
+                                proc.stderr.decode("utf-8", "replace")[-1200:])
+    return out_path
+
+
+def generate_usage_panels(api_key, plan, shot, out_path, image_urls, *, model=DEFAULT_MODEL,
+                          include_human=True, force=False, resume_tasks=None,
+                          on_progress=None):
+    """Generate nine independent usage frames and compose a review board."""
+    panel_dir = os.path.join(os.path.dirname(os.path.abspath(out_path)), "usage_panels")
+    os.makedirs(panel_dir, exist_ok=True)
+    panel_paths = [os.path.join(panel_dir, "panel_%02d.jpg" % index)
+                   for index in range(1, 10)]
+
+    def generate(index):
+        prompt = product_usage_panel_prompt(plan, shot, index, include_human=include_human)
+        if isinstance(image_urls, dict):
+            panel_urls = image_urls.get(str(index)) or image_urls.get(index) or []
+        else:
+            panel_urls = image_urls
+        result = download_first_image(
+            api_key, prompt, panel_paths[index - 1], model=model, ratio="16:9",
+            image_urls=panel_urls,
+            resume_task_id=(resume_tasks or {}).get(str(index)), force=force,
+            on_progress=(lambda event: on_progress(index, event)
+                         if on_progress else None))
+        result["panel_index"] = index
+        result["prompt"] = prompt
+        return result
+
+    results = [None] * 9
+    with ThreadPoolExecutor(max_workers=9) as executor:
+        futures = {executor.submit(generate, index): index for index in range(1, 10)}
+        for future in as_completed(futures):
+            index = futures[future]
+            results[index - 1] = future.result()
+    _compose_usage_panels(panel_paths, out_path)
+    panel_urls = [item.get("url") for item in results if item.get("url")]
+    return {
+        "path": out_path,
+        "abspath": os.path.abspath(out_path),
+        "sha256": _file_sha256(out_path),
+        "panel_paths": [os.path.abspath(path) for path in panel_paths],
+        "panel_urls": panel_urls,
+        "imageUrls": panel_urls,
+        "representative_panel_index": 5,
+        "url": panel_urls[4] if len(panel_urls) >= 5 else (panel_urls[0] if panel_urls else ""),
+        "generation_mode": "panelized_local_composite",
+        "panels": results,
+    }
 
 
 def expand_storyboard_panel(api_key, segment, *, out_dir):
@@ -1475,6 +1634,100 @@ def _usage_reference_urls(product_refs=None, cast_refs=None, pose_refs=None, lim
     return _merge_reference_urls(product_refs, cast_refs, pose_refs, limit=limit)
 
 
+def _single_view_reference(source_path, out_dir, label, *, grid=None, cell=None):
+    """Derive one visual identity anchor from a confirmed reference board.
+
+    Contact sheets are excellent review artifacts but are a poor img2img
+    reference for a single-frame request: image models may copy the sheet
+    layout. This local, deterministic derivative preserves the approved pixels
+    while removing the grid from the image sent to the model. The original
+    board remains the source of truth and is recorded by the caller.
+    """
+    if not source_path or not os.path.isfile(source_path):
+        return source_path
+    if not grid or not cell:
+        return os.path.abspath(source_path)
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise br_client.BRError(
+            "产品使用图参考素材处理失败：缺少 Pillow，无法从确认板提取单视图身份锚点。"
+        ) from exc
+    cols, rows = grid
+    col, row = cell
+    if cols <= 0 or rows <= 0 or not (0 <= col < cols and 0 <= row < rows):
+        raise br_client.BRError("USAGE_REFERENCE_GRID_INVALID: %s %s %s" %
+                                (source_path, grid, cell))
+    source_path = os.path.abspath(source_path)
+    try:
+        image_context = Image.open(source_path)
+    except Exception:
+        # Unit/diagnostic callers may provide placeholder bytes while mocking
+        # the remote generation layer. Let the normal reference validation
+        # report those bytes instead of failing in the optional crop step.
+        return source_path
+    with image_context as image:
+        width, height = image.size
+        x0 = round(width * col / cols)
+        x1 = round(width * (col + 1) / cols)
+        y0 = round(height * row / rows)
+        y1 = round(height * (row + 1) / rows)
+        # Leave the cell border behind. A one-pixel inset also prevents a
+        # board divider from becoming a false object edge in the new prompt.
+        inset = max(1, min(x1 - x0, y1 - y0) // 200)
+        crop = image.crop((x0 + inset, y0 + inset, x1 - inset, y1 - inset))
+        source_sha = _file_sha256(source_path)[:12]
+        name = "%s_%s_%d_%d_%s.png" % (
+            safe_name(label), source_sha, col, row,
+            hashlib.sha256((str(grid) + str(cell)).encode("ascii")).hexdigest()[:8])
+        ref_dir = os.path.join(os.path.abspath(out_dir), "usage_reference_anchors")
+        os.makedirs(ref_dir, exist_ok=True)
+        out_path = os.path.join(ref_dir, name)
+        if not os.path.isfile(out_path):
+            crop.convert("RGB").save(out_path, format="PNG")
+    return os.path.abspath(out_path)
+
+
+def _prepare_usage_panel_reference_paths(product_board_path, product_image_paths,
+                                          cast_board_path, out_dir, *,
+                                          include_human=True):
+    """Build single-view refs for the nine product-use image requests.
+
+    The product and cast boards remain authoritative. The API receives only a
+    single product view plus, when needed, a single Mina view per request so a
+    model cannot reproduce either board's 3x3/3x2 layout inside one panel.
+    """
+    product_image_paths = [p for p in (product_image_paths or [])
+                           if p and os.path.isfile(p)]
+    hero = product_image_paths[-1] if product_image_paths else None
+    product_front = _single_view_reference(
+        product_board_path, out_dir, "product_front", grid=(3, 3), cell=(0, 0))
+    product_bottom = _single_view_reference(
+        product_board_path, out_dir, "product_bottom", grid=(3, 3), cell=(2, 2))
+    product_anchor = hero or product_front
+    if not product_anchor:
+        raise br_client.BRError("USAGE_REFERENCE_PRODUCT_MISSING: 缺少已确认产品身份图。")
+
+    human_anchor = None
+    if include_human and cast_board_path:
+        # Full-body front view keeps Mina's clothing and proportions stable;
+        # the model can use it as an identity anchor for medium/close shots.
+        human_anchor = _single_view_reference(
+            cast_board_path, out_dir, "mina_front", grid=(3, 2), cell=(0, 0))
+
+    refs = {}
+    # Mechanical proof panels benefit from the approved bottom view. Other
+    # panels use the clean hero view to keep the speaker silhouette stable.
+    bottom_panels = {2, 3, 4, 6}
+    for index in range(1, 10):
+        product_ref = product_bottom if index in bottom_panels else product_anchor
+        values = [product_ref]
+        if human_anchor:
+            values.append(human_anchor)
+        refs[str(index)] = values
+    return refs
+
+
 def _reference_url_abs(url):
     if not isinstance(url, str) or not url:
         return url
@@ -1654,6 +1907,82 @@ def _shot_needs_usage_reference(shot):
     return _has_physical_use_action(shot)
 
 
+def _force_usage_reference(shot):
+    value = (shot or {}).get("force_usage_reference")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "force", "forced"}
+    return False
+
+
+def _explicit_usage_contract(shot):
+    if not isinstance(shot, dict) or "requires_usage" not in shot:
+        return None
+    return bool(shot.get("requires_usage"))
+
+
+def canonicalize_usage_ref_tags(plan):
+    """Persist product-use reference decisions on each shot.
+
+    The usage board is a storyboard contract input, not a video handoff patch.
+    Shots with physical operation/use semantics carry ``requires_usage: true``
+    and an explicit ``@usage`` tag; pure product or presenter shots carry
+    ``requires_usage: false`` and do not inherit usage geometry.
+    """
+    for shot in (plan or {}).get("shots") or []:
+        if not isinstance(shot, dict):
+            continue
+        contract_value = _explicit_usage_contract(shot)
+        requires_usage = (
+            contract_value if contract_value is not None
+            else (_force_usage_reference(shot) or _shot_needs_usage_reference(shot))
+        )
+        tags = _shot_ref_tags(shot)
+        if requires_usage:
+            tags = ["@usage"] + [tag for tag in tags if tag != "@usage"]
+        elif not _force_usage_reference(shot):
+            tags = [tag for tag in tags if tag != "@usage"]
+        shot["requires_usage"] = bool(requires_usage)
+        shot["ref_tags"] = list(dict.fromkeys(tags))
+    return plan
+
+
+def _sync_usage_reference_contract(plan):
+    """Keep asset_refs, global references and shot references in agreement."""
+    asset_refs = plan.get("asset_refs") or {}
+    usage_urls = asset_refs.get("product_usage_images") or []
+    if not usage_urls:
+        return plan
+    usage_ref = {
+        "id": "ref_product_usage_confirmed",
+        "url": usage_urls[0],
+        "type": "product_usage_identity",
+        "scope": "global",
+        "label": "Confirmed product usage board",
+        "role": "physical product-use and contact-surface anchor",
+        "intent": "Lock the approved product-use relationship, contact surfaces and operating orientation.",
+        "tag": "@usage",
+    }
+    global_refs = [ref for ref in (plan.get("references") or [])
+                   if isinstance(ref, dict)]
+    global_usage = next((ref for ref in global_refs if ref.get("tag") == "@usage"), None)
+    if global_usage is None:
+        global_refs.append(dict(usage_ref))
+    else:
+        global_usage.update(dict(usage_ref))
+    plan["references"] = global_refs
+
+    for shot in plan.get("shots") or []:
+        if "@usage" not in _shot_ref_tags(shot):
+            continue
+        shot_refs = [ref for ref in (shot.get("references") or [])
+                     if isinstance(ref, dict) and ref.get("tag") != "@usage"]
+        shot_refs.append(dict(usage_ref))
+        shot["references"] = shot_refs
+    return plan
+
+
 def shot_reference_registry(reference_registry, shot):
     """Filter the global registry to the exact images this shot may receive."""
     registry = reference_registry or []
@@ -1667,7 +1996,10 @@ def shot_reference_registry(reference_registry, shot):
             allowed.append(item)
             seen.add(tag)
 
-    if _shot_needs_usage_reference(shot):
+    requires_usage = _explicit_usage_contract(shot)
+    if requires_usage is None:
+        requires_usage = _force_usage_reference(shot) or _shot_needs_usage_reference(shot)
+    if requires_usage:
         add("@usage")
     for tag in _shot_ref_tags(shot):
         add(tag)
@@ -1705,6 +2037,19 @@ def _hydrate_plan_asset_refs(plan):
     validation and product-board generation.
     """
     refs = dict(plan.get("asset_refs") or {})
+    # Older plans stored the confirmed usage board under the singular
+    # ``product_usage_board`` key. The reference contract and downstream video
+    # handoff use the plural ``product_usage_images`` bucket, so migrate the
+    # legacy pointer before canonicalize_usage_ref_tags adds @usage. Without
+    # this normalization the plan can contain @usage with no registry entry.
+    if not refs.get("product_usage_images") and refs.get("product_usage_board"):
+        legacy_usage = refs.get("product_usage_board")
+        if isinstance(legacy_usage, str):
+            candidate = (legacy_usage if os.path.isabs(legacy_usage)
+                         else os.path.join(ROOT, legacy_usage))
+            if (os.path.isfile(candidate) or
+                    legacy_usage.startswith(("http://", "https://", "data:"))):
+                refs["product_usage_images"] = [legacy_usage]
     # Filter stale local paths even when no brief exists yet. Otherwise an
     # LLM-authored path can survive hydration and fail only after generation
     # credits have been requested.
@@ -1941,6 +2286,10 @@ def _product_identity_lock(facts):
         "surface curvature and all visible functional parts. Do not simplify, flatten, round off, change category, add/remove modules, "
         "or replace it with a generic object. 产品身份锁定：每一格都必须严格继承已确认产品板中的同一件产品，"
         "不得因使用姿势而改变造型、比例、颜色、按钮、接口、Logo、孔位或品类。 "
+        "Occlusion, attachment, support, folding, wearing or contact with another object must never change the product's 3D volume or silhouette. "
+        "Keep the same thickness, edge profile, curvature, seams, control areas and functional surfaces even when part of the product is hidden. "
+        "Never redraw the product as a flat patch, half-disc, hemisphere, wedge, stand base, generic cylinder, sticker or replacement housing. "
+        "遮挡、磁吸、承重、折叠、佩戴或与其他物品接触时，产品仍是完整同一实体；禁止被压扁、切掉、拉长、变薄或改造成支撑件。 "
         % (product_name, detail_text)
     )
 
@@ -2211,6 +2560,10 @@ def _surface_attachment_lock(relation):
         "Never show the active product standing, sitting, resting, balanced, stacked, perched, leaning or placed on top of the receiver, on its edge, or on its front/display side. "
         "中文硬约束：这是通用表面连接合同，不是某个物品的专用规则。只有“产品接触面”可以接触“目标接触面”；产品外露/可操作面必须保持朝外可见。禁止把接触面、展示面、控制面、装饰面互换，禁止把产品画成其它品类或扁平贴片。\n"
         "中文补充：目标物是承载平面，不是托盘/桌面/上沿/底座；产品必须由接触面贴合该平面并向外突出，禁止画成站在、立在、放在、搁在、靠在目标物上。\n"
+        "PANEL-SPECIFIC SURFACE PROOF: Panel 3 must show the receiver's broad specified contact plane facing the camera, with the product aligned toward that plane; never use only the receiver edge, rim, top edge or side rail as the proof. "
+        "Panel 4 must show the same broad receiver contact plane behind the product plus a visible flush contact line after attachment; the product must protrude outward from that plane. "
+        "Panel 7 must show the product's outward/operable surface facing the viewer while the receiver's specified contact plane remains visibly behind it; never attach the product to the receiver display/front face, side edge or top edge. "
+        "逐格硬证明：第3格必须看见目标接触面的宽平面，不能只看手机边框；第4格必须同时看见贴合后的目标平面与接触线；第7格展示产品外露面时，目标接触面必须位于产品后方，禁止吸在屏幕、侧边或上沿。\n"
         % (
             relation.get("product_contact_surface") or "specified product contact surface",
             relation.get("receiver_contact_surface") or "specified receiver contact surface",
@@ -2399,6 +2752,7 @@ def asset_prompt_review_items(plan):
             "kind": "product_usage_image",
             "stage": "storyboard_asset",
             "submission_prompt_zh": prompt,
+            "generation_mode": "panelized_local_composite",
             "negative_prompt_zh": "错误接触面、错误朝向、错误外露面、产品形变、手部畸形、人物或产品替换",
             "policy_version": PRODUCT_USAGE_POLICY_VERSION,
             "physical_relation_contract": product_usage_physical_relation(plan, usage_shot),
@@ -2407,6 +2761,14 @@ def asset_prompt_review_items(plan):
         geometry = product_usage_geometry_contract(plan, usage_shot)
         if geometry:
             item["geometry_contract"] = geometry
+        item["panel_prompts"] = [
+            product_usage_panel_prompt(plan, usage_shot, index,
+                                       include_human=has_human)
+            for index in range(1, 10)
+        ]
+        item["submission_prompt_zh"] = "\n\n".join(
+            "[PANEL %d]\n%s" % (index, panel_prompt)
+            for index, panel_prompt in enumerate(item["panel_prompts"], 1))
         items.append(item)
     for item in items:
         item["prompt_fingerprint"] = hashlib.sha256(
@@ -2657,6 +3019,19 @@ def _validate_usage_board_identity_references(board):
         raise br_client.BRError(
             "USAGE_IDENTITY_REFERENCE_MISSING: 产品使用图记录的产品身份锚点文件不存在：%s。"
             "请重新生成产品使用图。" % ", ".join(missing))
+    if board.get("generation_mode") == "panelized_local_composite":
+        panel_paths = board.get("panel_paths") or []
+        panel_urls = board.get("panel_urls") or board.get("imageUrls") or []
+        if len(panel_paths) != 9 or len(panel_urls) != 9:
+            raise br_client.BRError(
+                "USAGE_PANEL_HANDOFF_INCOMPLETE: 逐格产品使用图必须保留 9 个本地素材和 9 个 retrieve URL；"
+                "当前为 %d 个本地素材、%d 个远程 URL，请重新生成。" %
+                (len(panel_paths), len(panel_urls)))
+        missing_panels = [path for path in panel_paths if not os.path.isfile(path)]
+        if missing_panels:
+            raise br_client.BRError(
+                "USAGE_PANEL_LOCAL_ASSET_MISSING: 逐格产品使用图缺少本地素材：%s。"
+                "请重新生成。" % ", ".join(missing_panels))
     return refs
 
 
@@ -3079,6 +3454,17 @@ def render_storyboard(plan_path, out_dir, model=DEFAULT_MODEL, run_id=None, flat
     if not api_key:
         raise br_client.BRError(ux.friendly_error("No API key. Run key onboarding first."))
     plan = load_plan_json(plan_path)
+    # The documented workflow writes the review beside the plan. Discover that
+    # artifact when the caller omits the optional flag, while still requiring
+    # the exact status and fingerprints below. This preserves the fail-closed
+    # gate without making the public command sequence self-contradictory.
+    if not prompt_review:
+        adjacent_review = os.path.join(
+            os.path.dirname(os.path.abspath(plan_path)),
+            "storyboard_prompt_review.json",
+        )
+        if os.path.isfile(adjacent_review):
+            prompt_review = adjacent_review
     from storyboard_validator import normalize_plan_motion_elements
     _, migrated_motion = normalize_plan_motion_elements(
         json.loads(json.dumps(plan, ensure_ascii=False)))
@@ -3147,7 +3533,22 @@ def render_storyboard(plan_path, out_dir, model=DEFAULT_MODEL, run_id=None, flat
               os.path.abspath(out_dir), flush=True)
 
     from storyboard_validator import validate_plan
-    validation = validate_plan(plan)
+    validation_plan = plan
+    # @usage is a real dependency once a confirmed usage board exists. During
+    # the usage stage itself, however, canonicalization already knows that a
+    # physical-use shot will need @usage even though that asset is precisely
+    # what this invocation is about to generate. Validate the current stage
+    # without that not-yet-created registry entry, while leaving the canonical
+    # plan unchanged for generation and later handoff.
+    if (stage in ("product", "cast", "usage") and
+            not (plan.get("asset_refs") or {}).get("product_usage_images")):
+        validation_plan = json.loads(json.dumps(plan, ensure_ascii=False))
+        for validation_shot in validation_plan.get("shots") or []:
+            tags = validation_shot.get("ref_tags") or []
+            if isinstance(tags, str):
+                tags = [tags]
+            validation_shot["ref_tags"] = [tag for tag in tags if tag != "@usage"]
+    validation = validate_plan(validation_plan)
     if not validation["ok"]:
         raise br_client.BRError(
             "故事板计划未通过生成前校验：%s" % "；".join(validation["errors"])
@@ -3203,13 +3604,16 @@ def render_storyboard(plan_path, out_dir, model=DEFAULT_MODEL, run_id=None, flat
         if state.get("kind") == "storyboard" and state.get("id") not in only_shot_ids:
             results.pop("in_progress", None)
 
+    checkpoint_lock = threading.Lock()
+
     def save_progress():
         # Atomic replace prevents an interruption during JSON serialization from
         # destroying the only resume checkpoint.
-        tmp_path = result_path + ".tmp"
-        Path(tmp_path).write_text(
-            json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp_path, result_path)
+        with checkpoint_lock:
+            tmp_path = result_path + ".tmp"
+            Path(tmp_path).write_text(
+                json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(tmp_path, result_path)
 
     def finish(stage_name=None, needs_confirmation=False):
         results["stage"] = stage_name or "storyboard"
@@ -3235,6 +3639,9 @@ def render_storyboard(plan_path, out_dir, model=DEFAULT_MODEL, run_id=None, flat
                        "out_path": os.path.abspath(out_path)}
             current.update(event)
             results["in_progress"] = current
+            if kind == "product_usage_image" and str(asset_id).startswith("usage_panel_"):
+                panels = results.setdefault("in_progress_panels", {})
+                panels[str(asset_id)] = current
             save_progress()
             if event.get("status") in ("submitted", "success", "failed"):
                 print("[storyboard] %s %s: %s" %
@@ -3416,15 +3823,38 @@ def render_storyboard(plan_path, out_dir, model=DEFAULT_MODEL, run_id=None, flat
         # product geometry in human-product interaction panels.
         usage_refs = _usage_reference_urls(
             product_usage_refs, cast_usage_refs, usage_pose_refs, limit=3)
+        # Do not send the contact-sheet boards directly to a single-panel
+        # img2img request. Their grid is a review layout and can be copied by
+        # the model. Use deterministic single-view derivatives while keeping
+        # the original confirmed boards in the source/fingerprint metadata.
+        panel_reference_paths = _prepare_usage_panel_reference_paths(
+            product_board_path, product_identity_paths, cast_board_path, out_dir,
+            include_human=has_human)
+        panel_reference_urls = {
+            index: _collect_image_urls(
+                paths, api_key, fail_on_invalid=True,
+                label="产品使用图第%s格参考图" % index)
+            for index, paths in panel_reference_paths.items()
+        }
         usage_backup = (_backup_existing_board(usage_out, out_dir, "usage")
                         if force_usage else None)
         usage_prompt_text = product_usage_prompt(
             plan, usage_prompt_shot, include_human=has_human)
+        panelized_usage = True
+        panel_prompt_text = "\n\n".join(
+            "[PANEL %d]\n%s" % (
+                index, product_usage_panel_prompt(
+                    plan, usage_prompt_shot, index, include_human=has_human))
+            for index in range(1, 10))
+        usage_generation_current = (
+            existing_usage.get("generation_mode") == "panelized_local_composite" and
+            all(os.path.isfile(path) for path in
+                (existing_usage.get("panel_paths") or [])))
         if force_usage:
             _mark_board_regeneration_pending(
                 results, "product_usage_image", kind="usage", path=usage_out,
                 source_fingerprint=usage_fp, backup_path=usage_backup)
-            results["product_usage_image"]["submission_prompt_zh"] = usage_prompt_text
+            results["product_usage_image"]["submission_prompt_zh"] = panel_prompt_text
             if usage_geometry_contract:
                 results["product_usage_image"]["geometry_contract"] = usage_geometry_contract
             if usage_relation_contract:
@@ -3433,30 +3863,48 @@ def render_storyboard(plan_path, out_dir, model=DEFAULT_MODEL, run_id=None, flat
             results["product_usage_image"]["usage_outcome_context"] = product_usage_outcome_context(
                 plan, usage_prompt_shot)
             save_progress()
-        if force_usage or not os.path.isfile(usage_out) or os.path.getsize(usage_out) == 0:
-            print("[gpt-image-2] rendering product-in-use detail image…", flush=True)
-            results["product_usage_image"] = download_first_image(
-                api_key, usage_prompt_text, usage_out,
-                model=model, ratio="16:9",
-                image_urls=usage_refs,
-                on_progress=progress_callback("product_usage_image", "usage", usage_out),
-                resume_task_id=None if force_usage else previous_task("product_usage_image", "usage"),
-                sync_img2img=True, force=force_usage)
+        if (force_usage or not os.path.isfile(usage_out) or
+                os.path.getsize(usage_out) == 0 or not usage_generation_current):
+            print("[gpt-image-2] rendering product-in-use detail image as 9 independent panels…", flush=True)
+            panel_tasks = {
+                str(item.get("panel_index")): item.get("task_id")
+                for item in (results.get("in_progress_panels") or {}).values()
+                if item.get("panel_index") and item.get("task_id")
+            }
+            results["product_usage_image"] = generate_usage_panels(
+                api_key, plan, usage_prompt_shot, usage_out, panel_reference_urls,
+                model=model, include_human=has_human, force=force_usage,
+                resume_tasks=panel_tasks,
+                on_progress=lambda index, event: progress_callback(
+                    "product_usage_image", "usage_panel_%02d" % index,
+                    os.path.join(os.path.dirname(usage_out), "usage_panels",
+                                 "panel_%02d.jpg" % index))(
+                                     dict(event, panel_index=index)))
+            results.pop("in_progress_panels", None)
             results["product_usage_image"]["source_fingerprint"] = usage_fp
-            results["product_usage_image"]["board_type"] = "usage_3x3"
+            results["product_usage_image"]["board_type"] = "usage_3x3_local_composite"
+            results["product_usage_image"]["generation_mode"] = "panelized_local_composite"
             results["product_usage_image"]["usage_policy_version"] = PRODUCT_USAGE_POLICY_VERSION
             if usage_geometry_contract:
                 results["product_usage_image"]["geometry_contract"] = usage_geometry_contract
             if usage_relation_contract:
                 results["product_usage_image"]["physical_relation_contract"] = usage_relation_contract
             results["product_usage_image"]["description"] = (
-                "产品使用九宫格：根据产品板与数字人板（如有）展示真实操作、手部接触和使用结果。")
+                "产品使用九宫格：9 张独立素材由模型分别生成，再由本地无模型拼版；每格保留原始 retrieve URL。")
+            results["product_usage_image"]["submission_prompt_zh"] = panel_prompt_text
             results["product_usage_image"]["identity_reference_paths"] = [
                 os.path.abspath(p) for p in product_identity_paths]
             results["product_usage_image"]["generation_reference_paths"] = [
                 os.path.abspath(p) for p in
                 product_identity_paths + ([cast_board_path] if cast_board_path else []) +
                 (asset_refs.get("usage_reference_images") or [])]
+            results["product_usage_image"]["panel_reference_paths"] = {
+                str(index): [os.path.abspath(path) for path in paths]
+                for index, paths in panel_reference_paths.items()
+            }
+            results["product_usage_image"]["panel_reference_policy"] = (
+                "每次单格请求仅提交单视图产品锚点和单视图 Mina 锚点；"
+                "产品板/人物板原图仅作为已确认来源与溯源元数据，不直接作为单格构图参考。")
             if usage_backup:
                 results["product_usage_image"]["forced_regeneration"] = {
                     "reason": "missing_remote_url",
@@ -3470,6 +3918,12 @@ def render_storyboard(plan_path, out_dir, model=DEFAULT_MODEL, run_id=None, flat
                 "abspath": os.path.abspath(usage_out), "skipped": True,
                 "source_fingerprint": existing_usage.get("source_fingerprint") or usage_fp,
                 "board_type": existing_usage.get("board_type") or "usage_3x3",
+                "generation_mode": existing_usage.get("generation_mode"),
+                "panel_paths": existing_usage.get("panel_paths") or [],
+                "panel_urls": existing_usage.get("panel_urls") or [],
+                "imageUrls": existing_usage.get("imageUrls") or [],
+                "representative_panel_index": existing_usage.get("representative_panel_index"),
+                "panels": existing_usage.get("panels") or [],
                 "usage_policy_version": (existing_usage.get("usage_policy_version") or
                                          confirmed_usage.get("usage_policy_version") or
                                          PRODUCT_USAGE_POLICY_VERSION),
@@ -3491,7 +3945,8 @@ def render_storyboard(plan_path, out_dir, model=DEFAULT_MODEL, run_id=None, flat
                 value = existing_usage.get(field) or confirmed_usage.get(field)
                 if value:
                     results["product_usage_image"][field] = value
-        results["product_usage_image"]["submission_prompt_zh"] = usage_prompt_text
+        results["product_usage_image"]["submission_prompt_zh"] = (
+            panel_prompt_text if panelized_usage else usage_prompt_text)
         if usage_geometry_contract:
             results["product_usage_image"]["geometry_contract"] = usage_geometry_contract
         if usage_relation_contract:

@@ -208,7 +208,8 @@ def _stale_storyboard_shot_ids(result, shots, storyboard):
 
 _AUTHOR_VISUAL_SHOT_KEYS = (
     "id", "panel_index", "visual", "characters",
-    "scene", "props", "ref_tags", "shot_size", "camera_movement",
+    "scene", "props", "ref_tags", "requires_usage", "force_usage_reference",
+    "shot_size", "camera_movement",
     "angle_offset", "composition", "lighting", "character_action",
     "micro_expression", "scene_prompt", "prop_prompts", "asset_refs",
 )
@@ -335,11 +336,15 @@ def _collect_typed_references(shot, plan_refs, shot_image, bw_storyboard=True):
         item.get("tag"): item for item in (refs.get("reference_registry") or [])
         if isinstance(item, dict) and item.get("tag") and item.get("url")
     }
-    try:
-        import storyboard as _storyboard
-        usage_action = _storyboard._shot_needs_usage_reference(shot)
-    except Exception:
-        usage_action = False
+    usage_contract = shot.get("requires_usage") if isinstance(shot, dict) else None
+    if isinstance(usage_contract, bool):
+        usage_action = usage_contract
+    else:
+        try:
+            import storyboard as _storyboard
+            usage_action = _storyboard._shot_needs_usage_reference(shot)
+        except Exception:
+            usage_action = False
     explicit_usage = "@usage" in wanted_tags
     if "@usage" in registry_by_tag and not explicit_usage and usage_action:
         wanted_tags.insert(0, "@usage")
@@ -1171,10 +1176,10 @@ def split(plan, storyboard_dir=None, fps=30, min_seconds=3, bw_storyboard=None,
         available_ref_tags = [ref.get("tag") for ref in references
                               if ref.get("tag") and ref.get("type") != "storyboard_composition"]
         ref_tags = [tag for tag in ref_tags if tag in set(available_ref_tags)]
-        # A confirmed usage board is mandatory only for shots that actually
-        # express a physical use relation. Plain presenter/product CTA shots
-        # must not inherit magnetic-use geometry.
-        if usage_required:
+        # A confirmed usage board is mandatory only when the storyboard
+        # contract says this shot has a physical use relation. Plain
+        # presenter/product CTA shots must not inherit magnetic-use geometry.
+        if bool(shot.get("requires_usage")):
             usage_tags = [ref.get("tag") for ref in references
                           if ref.get("type") == "product_usage_identity" and ref.get("tag")]
             ref_tags = list(dict.fromkeys(list(ref_tags) + usage_tags))

@@ -51,6 +51,9 @@ class StoryboardSpecTests(unittest.TestCase):
         self.assertIn("1-Vibe Go Lite 马卡龙磁吸无线音箱", prompt)
         self.assertIn("Product identity lock", prompt)
         self.assertIn("confirmed product board is the highest-priority", prompt)
+        self.assertIn("Occlusion, attachment, support", prompt)
+        self.assertIn("Never redraw the product as a flat patch", prompt)
+        self.assertIn("产品仍是完整同一实体", prompt)
         self.assertIn("Preserve genuine logos", prompt)
         self.assertIn("non-product text overlays", prompt)
         self.assertNotIn("Luna", prompt)
@@ -87,6 +90,28 @@ class StoryboardSpecTests(unittest.TestCase):
                 "Forbidden mistakes",
                 "通用表面连接合同"):
             self.assertIn(term, prompt)
+
+    def test_usage_panelized_generation_has_one_explicit_goal_per_frame(self):
+        plan = {
+            "product_name": "1-Vibe Go Lite",
+            "shots": [{
+                "id": "use",
+                "visual": "产品底部磁吸面贴合手机背面，手机横放在桌面",
+                "character_action": "手将产品底部贴合手机背面",
+            }],
+        }
+        relation = storyboard.product_usage_physical_relation(plan)
+        goals = storyboard._usage_panel_goals(relation)
+        self.assertEqual(len(goals), 9)
+        self.assertNotEqual(goals[2], goals[3])
+        self.assertIn("broad", goals[2])
+        self.assertIn("contact line", goals[3])
+        panel3 = storyboard.product_usage_panel_prompt(plan, plan["shots"][0], 3)
+        panel7 = storyboard.product_usage_panel_prompt(plan, plan["shots"][0], 7)
+        self.assertIn("ONE clean 16:9", panel3)
+        self.assertIn("receiver edge", panel3)
+        self.assertIn("behind it", panel7)
+        self.assertNotIn("3x3 board", panel3)
 
     def test_product_usage_prompt_accepts_reviewed_composition_skill_brief(self):
         plan = {
@@ -285,6 +310,36 @@ class StoryboardSpecTests(unittest.TestCase):
         self.assertEqual(
             [item["tag"] for item in storyboard.shot_reference_registry(registry, mina_shot)],
             ["@mina", "@product_hero"])
+
+    def test_canonical_plan_persists_usage_contract_per_shot(self):
+        plan = {"shots": [
+            {"id": "s1", "visual": "product-only clean desktop beauty shot",
+             "ref_tags": ["@product_hero"]},
+            {"id": "s2", "visual": "hand magnetically attaches the speaker to the phone back",
+             "ref_tags": ["@product_hero"]},
+            {"id": "s3", "visual": "presenter says the product is easy to use",
+             "requires_usage": False, "ref_tags": ["@usage", "@product_hero"]},
+        ]}
+        canonical = storyboard.canonical_storyboard_plan(plan)
+        by_id = {shot["id"]: shot for shot in canonical["shots"]}
+
+        self.assertFalse(by_id["s1"]["requires_usage"])
+        self.assertEqual(by_id["s1"]["ref_tags"], ["@product_hero"])
+        self.assertTrue(by_id["s2"]["requires_usage"])
+        self.assertEqual(by_id["s2"]["ref_tags"], ["@usage", "@product_hero"])
+        self.assertFalse(by_id["s3"]["requires_usage"])
+        self.assertEqual(by_id["s3"]["ref_tags"], ["@product_hero"])
+
+    def test_force_usage_reference_preserves_manual_usage_tag(self):
+        canonical = storyboard.canonical_storyboard_plan({"shots": [{
+            "id": "s1",
+            "visual": "static product beauty shot",
+            "force_usage_reference": True,
+            "ref_tags": ["@product_hero"],
+        }]})
+        shot = canonical["shots"][0]
+        self.assertTrue(shot["requires_usage"])
+        self.assertEqual(shot["ref_tags"], ["@usage", "@product_hero"])
 
     def test_product_usage_cil_does_not_infer_from_presenter_or_earrings(self):
         plan = {
@@ -486,6 +541,12 @@ class StoryboardSpecTests(unittest.TestCase):
         self.assertTrue(any("价格快闪效果" in item for item in shot["motion_elements"]))
         self.assertNotRegex(shot["visual"], storyboard_validator.TEXT_IN_FRAME)
         self.assertNotRegex(shot["prop_prompts"][0], storyboard_validator.TEXT_IN_FRAME)
+
+    def test_negative_text_constraints_do_not_trigger_text_generation_error(self):
+        self.assertFalse(storyboard_validator.has_positive_text_request(
+            "清爽桌面，无字幕、无文字、无水印，不生成参数标签"))
+        self.assertTrue(storyboard_validator.has_positive_text_request(
+            "产品旁边显示参数标签快闪"))
 
     def test_normalize_preserves_existing_motion_elements(self):
         plan = {"aspect_ratio": "16:9", "shots": [{

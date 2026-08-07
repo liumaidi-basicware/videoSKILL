@@ -13,6 +13,9 @@ Envelope: {code,message,data}; code 200 ok, -1 insufficient credit.
 import os
 import json
 import socket
+import ssl
+import shutil
+import subprocess
 import time
 import random
 import base64
@@ -103,6 +106,16 @@ def is_video_reference_privacy_error(value):
             and any(term in text for term in rejection_terms))
 
 
+def is_insufficient_credit(value):
+    """Classify billing exhaustion so it is never treated as a transient 5xx."""
+    payload = value.payload if isinstance(value, BRError) and value.payload is not None else value
+    text = unicodedata.normalize(
+        "NFKC", " ".join(_error_texts(payload)) + " " + str(value)).lower()
+    return ("insufficient credit" in text or "insufficient_credits" in text or
+            "余额不足" in text or "额度不足" in text or
+            "credit not enough" in text)
+
+
 def is_video_model_not_found(value):
     """Return true for provider errors that mean the submitted model ID is invalid."""
     payload = value.payload if isinstance(value, BRError) and value.payload is not None else value
@@ -129,6 +142,103 @@ def _backoff_seconds(attempt, retry_after=None):
             pass
     exp = BASE_BACKOFF * (2 ** (attempt - 1))
     return min(exp, MAX_BACKOFF) + random.uniform(0, 1.0)  # 抖动避免雷同重试
+
+
+def _is_tls_runtime_error(error):
+    """Identify failures that happen before an HTTPS request can be sent."""
+    reason = getattr(error, "reason", error)
+    text = str(reason).lower()
+    return (isinstance(reason, ssl.SSLError) or
+            "ssl" in text or "tls" in text or
+            "eof occurred in violation of protocol" in text)
+
+
+def _curl_json_request(method, url, headers, data, timeout):
+    """Use system curl when the host Python TLS runtime cannot handshake.
+
+    Secrets never appear in argv or project files. Curl receives them through
+    a mode-0600 temporary config which is deleted immediately after the call.
+    """
+    curl = shutil.which("curl")
+    if not curl:
+        raise BRError("TLS_RUNTIME_INCOMPATIBLE: system curl unavailable")
+    temp_dir = tempfile.mkdtemp(prefix="br-curl-")
+    os.chmod(temp_dir, 0o700)
+    config_path = os.path.join(temp_dir, "request.conf")
+    request_path = os.path.join(temp_dir, "request.json")
+    response_path = os.path.join(temp_dir, "response.json")
+    header_path = os.path.join(temp_dir, "response.headers")
+    try:
+        if data is not None:
+            with open(request_path, "wb") as handle:
+                handle.write(data)
+            os.chmod(request_path, 0o600)
+        config_lines = [
+            "silent",
+            "show-error",
+            "location",
+            'request = "%s"' % method.replace('"', ''),
+            'url = "%s"' % url.replace('"', '%22'),
+            "connect-timeout = 30",
+            "max-time = %d" % max(1, int(timeout)),
+            'dump-header = "%s"' % header_path,
+        ]
+        for name, value in headers.items():
+            clean_name = str(name).replace('"', '')
+            clean_value = str(value).replace('"', '\\"').replace("\n", "").replace("\r", "")
+            config_lines.append('header = "%s: %s"' % (clean_name, clean_value))
+        if data is not None:
+            config_lines.append('data-binary = "@%s"' % request_path)
+        with open(config_path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(config_lines) + "\n")
+        os.chmod(config_path, 0o600)
+        completed = subprocess.run(
+            [curl, "--config", config_path, "--output", response_path,
+             "--write-out", "%{http_code}"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout + 35)
+        if completed.returncode != 0:
+            error = completed.stderr.decode("utf-8", "replace")[:400]
+            raise BRError("network error (curl TLS fallback): %s" % error)
+        status_text = completed.stdout.decode("ascii", "replace").strip()
+        try:
+            status = int(status_text[-3:])
+        except ValueError:
+            raise BRError("curl TLS fallback returned invalid HTTP status")
+        with open(response_path, "rb") as handle:
+            raw = handle.read().decode("utf-8", "replace")
+        response_headers = {}
+        if os.path.exists(header_path):
+            with open(header_path, encoding="iso-8859-1") as handle:
+                for line in handle:
+                    if ":" in line:
+                        key, value = line.split(":", 1)
+                        response_headers[key.strip().lower()] = value.strip()
+        if status < 200 or status >= 300:
+            try:
+                payload = json.loads(raw)
+            except (TypeError, ValueError):
+                payload = raw[:400]
+            if is_insufficient_credit(payload):
+                raise BRError("Insufficient credit (余额不足): %s" % raw[:300],
+                              payload=payload, http_status=status,
+                              request_id=response_headers.get("x-request-id"))
+            if status == 429:
+                raise BRRateLimited("限流(429): %s" % raw[:300], payload=payload,
+                                    http_status=status)
+            error = BRError("HTTP %s: %s" % (status, raw[:400]), payload=payload,
+                            http_status=status,
+                            request_id=response_headers.get("x-request-id"))
+            if is_video_reference_privacy_error(error):
+                raise BRVideoReferencePrivacyError(str(error), payload=payload,
+                                                   http_status=status,
+                                                   request_id=error.request_id)
+            raise error
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            raise BRError("non-JSON response: " + raw[:400])
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def _request(method, path, api_key=None, body=None, query=None, timeout=120,
@@ -163,6 +273,15 @@ def _request(method, path, api_key=None, body=None, query=None, timeout=120,
                 raise BRError("non-JSON response: " + raw[:400])
         except urllib.error.HTTPError as e:
             raw = e.read().decode("utf-8", "replace")
+            try:
+                payload = json.loads(raw)
+            except (TypeError, ValueError):
+                payload = raw[:400]
+            if is_insufficient_credit(payload):
+                raise BRError("Insufficient credit (余额不足): %s" % raw[:300],
+                              payload=payload, http_status=e.code,
+                              request_id=(e.headers.get("X-Request-Id")
+                                          if e.headers else None))
             # 可重试状态码：退避后重试
             if can_retry and e.code in RETRY_STATUS and attempt < max_retries:
                 attempt += 1
@@ -175,10 +294,6 @@ def _request(method, path, api_key=None, body=None, query=None, timeout=120,
             if e.code == 429:
                 raise BRRateLimited(
                     "限流(429)重试 %d 次仍失败: %s" % (attempt, raw[:300]))
-            try:
-                payload = json.loads(raw)
-            except (TypeError, ValueError):
-                payload = raw[:400]
             request_id = e.headers.get("X-Request-Id") if e.headers else None
             error = BRError("HTTP %s: %s" % (e.code, raw[:400]), payload=payload,
                             http_status=e.code, request_id=request_id)
@@ -190,6 +305,8 @@ def _request(method, path, api_key=None, body=None, query=None, timeout=120,
                 socket.timeout) as e:
             # 网络瞬时错误也重试（超时/连接重置等）
             reason = getattr(e, "reason", e)
+            if _is_tls_runtime_error(e):
+                return _curl_json_request(method, url, headers, data, timeout)
             if can_retry and attempt < max_retries:
                 attempt += 1
                 wait = _backoff_seconds(attempt)
@@ -627,6 +744,7 @@ def _legacy_video_model_name(model):
     """
     if not model:
         return model
+    seedance_names = _seedance_submission_names(model)
     try:
         for item in list_video_models(None):
             if not isinstance(item, dict):
@@ -638,6 +756,8 @@ def _legacy_video_model_name(model):
                 aliases = [aliases]
             names.extend(aliases if isinstance(aliases, list) else [])
             names = [str(value).strip() for value in names if value]
+            if any("seedance" in value.lower() for value in names):
+                names = list(dict.fromkeys(seedance_names + names))
             if str(model).strip() == str(canonical).strip() and names:
                 return names[0]
             if str(model).strip() in names:
@@ -647,7 +767,9 @@ def _legacy_video_model_name(model):
     return {
         # These are offline-only aliases. Live catalog names always win and
         # unknown names must not be rewritten into a guessed model ID.
-        "dreamina-seedance-2-0-260128": "seedance-2.0",
+        "seedance-2.0": "seedance-2.0-VS-white",
+        "seedance-2.0-white": "seedance-2.0-VS-white",
+        "dreamina-seedance-2-0-260128": "seedance-2.0-VS-white",
         "dreamina-seedance-2-0-fast-260128": "seedance-2.0-fast",
         "wan2.7-i2v": "wan2.7-i2v",
     }.get(str(model).strip(), model)
@@ -661,6 +783,9 @@ def _legacy_video_model_candidates(model):
     duplicated for parameter, policy, credit, or network failures.
     """
     requested = str(model or "").strip()
+    seedance_preferred = _seedance_submission_names(requested)
+    if seedance_preferred:
+        return seedance_preferred
     candidates = []
     try:
         for item in list_video_models(None):
@@ -722,7 +847,14 @@ def _catalog_alias_values(value):
     return [str(item).strip() for item in value if item]
 
 
-def create_video(api_key, text, model="kling-v3-omni-video", video_type=1,
+def _seedance_submission_names(value):
+    text = str(value or "").strip().lower()
+    if "seedance" not in text:
+        return []
+    return ["seedance-2.0-VS-white"]
+
+
+def create_video(api_key, text, model="seedance-2.0-VS-white", video_type=1,
                  urls=None, resolution="1080p", ratio="9:16", duration=5,
                  negative_prompt=None, seed=None, extra=None, extend_video_url=None,
                  request_id=None):

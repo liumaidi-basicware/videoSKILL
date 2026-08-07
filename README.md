@@ -130,5 +130,6 @@ powershell -ExecutionPolicy Bypass -File .\deploy.ps1
 - **装依赖失败？** 多为网络问题。确认能访问 PyPI / npm；网络受限时可让当前 Agent 换镜像源重试。
 - **没有某个特定 Agent / 没有 Node？** 本项目不要求指定 Agent；任选兼容宿主即可。deploy 脚本会处理业务运行依赖，但不会擅自安装或切换宿主 Agent。
 - **视频生成失败？** 可能是 API Key 无效、余额不足、限流或网络超时。当前 Agent 应用客户能理解的语言说明原因和下一步。
+- **想看流程画布？** 可用 `python3 scripts/workflow_canvas.py generate ...` 一次性导出；或用 `python3 scripts/workflow_canvas.py serve ...` 起一个会自动刷新、能记录评论和历史轨迹的本地工作台。它会自动从当前 workspace 里反推 `client / run-id`，把 `manifest / brief / storyboard_result / segments / run.log` 汇成一页画布，显示当前步骤、素材引用、修改回路和事件流。
 
 生成的成片、口型、Logo 稳定性以实际结果为准；建议人工过目一遍再发布。

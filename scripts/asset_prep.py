@@ -686,8 +686,9 @@ def refine_image(client, rel_or_path, edit_prompt, ratio="1:1", resolution="2k",
     url = _create_one(k, prompt, refs, ratio, resolution, model)
     return _save_image(client, url, tag, edit_prompt, status="pending",
                        variant="edit", extra={"edited_from": rel,
+                                               "edit_prompt": edit_prompt,
                                                "feedback_refs": feedback_paths} if feedback_paths else
-                       {"edited_from": rel})
+                       {"edited_from": rel, "edit_prompt": edit_prompt})
 
 
 def confirm_image(client, rel_or_path, discard_others=True):

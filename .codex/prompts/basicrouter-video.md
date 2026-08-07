@@ -28,12 +28,16 @@ python3 scripts/key_setup.py gate --session-id <公共会话ID>
 - `STORED`（exit 0）→ 本会话密钥已就绪，进第二步，不念技术输出。
 - `BLOCKED`（exit 1）→ **立即停下**，请客户粘贴 `sk-` 开头的密钥，收到后通过标准输入执行 `python3 scripts/key_setup.py save --stdin --session-id <公共会话ID>`。不得把 key 放入命令参数或日志。
 
-## 第二步 · 确定客户 client 代号（通用包必做）
+## 第二步 · 自动识别客户与 run（尽量不打扰客户）
 
-本包不是单一品牌专用。正式创作前先确定 `CLIENT`，并使用 `python3 START_HERE_AGENT.py init --client <CLIENT> --run-id <RUN_ID> --out output/<CLIENT>/<RUN_ID>/run_manifest.json` 创建正式 run；之后所有阶段按 `python3 START_HERE_AGENT.py status --manifest ...` 推进。缺素材时只能生成缺口报告并回到上传/补图确认，不能以资料后补为理由把 draft 当正式交付：
-- 若客户已经说了品牌/客户名，把它转成英文小写 slug（如 `acme`、`hotel_hk`）。
-- 若没说，先问一句：「这次服务哪个品牌？我会用一个英文代号单独保存素材，例如 `acme`。」
-- 后续所有命令都使用 `--client <CLIENT>`，读取/写入 `assets/<CLIENT>/`、`brand/<CLIENT>/`、`actors/<CLIENT>/`。不要默认使用 demo 目录。
+本包不是单一品牌专用。正式创作前先自动扫描当前工作区里的 `manifest.json`、`storyboard_result.json`、`run.log`、`segments.json` 和 `assets/<client>/brief.json`，优先绑定当前最完整的 `CLIENT / RUN_ID`。只在完全找不到任何候选时，才回退去问客户品牌名。
+
+工作方式：
+- 若已经有 `manifest / storyboard_result / run.log / segments` 任一类产物，就直接从文件反推 `CLIENT / RUN_ID`。
+- 若多个候选同时存在，就选“最新且信息最完整”的那一个，并把画布/预览页作为唯一查看入口。
+- 不要把 `client` / `run-id` 当成需要客户手填的表单项；最多只在无法自动识别时问一次品牌名。
+- 后续命令若需要显式参数，仍然使用自动识别到的 `--client <CLIENT>` 和 `--run-id <RUN_ID>`，但不要把这两个值再问客户一遍。
+- 一旦识别出当前 run，先起 `python3 scripts/workflow_canvas.py serve ...`（或者静态 `generate` 兜底），再把访问地址告诉客户；**第一轮回复必须明确告诉客户整体画布在哪里看**，例如“我已经把工作流画布打开在 `workflow_canvas.html` / `workflow_canvas.py serve` 的本地地址”，不要先解释一堆参数，客户只需要知道去哪里看进度。
 
 ## 第三步 · 素材分诊 → 先锁主题（优先级高于选场景）
 
@@ -111,6 +115,8 @@ python3 scripts/key_setup.py gate --session-id <公共会话ID>
    成功标准：命令输出里必须出现 `[gpt-image-2] rendering cast board…` / `[gpt-image-2] rendering storyboard shot ...`，且 JSON 为 `"ok": true`。使用稳定的 `--run-id <本次脚本版本ID>`，被中断后用同一个 run-id 重跑；不要省略 run-id 让每次重跑创建新目录。默认会产生本次会话独立目录 `output/storyboard/<run-id>/`，其中包含 `cast_board.jpg`（人物六视图参考图：每个出场人物包含全身正/后/侧 + 正脸正/后/侧六种视图）、每段视频一张 16:9、4x3、12 格的 `shot_*.jpg`、`storyboard_index.md`、`storyboard_embedded.md`、`storyboard_preview.html`、`storyboard_result.json`。脚本会在每个云端任务提交后落盘 taskId，并每 30 秒输出心跳；中断后会继续轮询原任务，不重复提交计费任务。如果是两段/多段视频拼接，`storyboard_plan.json` 里必须显式写清共同的 `continuity`：背景、人物形象/服装、人物声音、BGM 氛围；同时每段分镜仍要遵守 30°–50° 角度偏移 / 远中近特写跨度原则。如果没有这些日志/文件，说明没有调用 gpt-image-2，不能继续出片。
 4a. **专业分镜/人物板补强但不替代引导方式**：继续用顾问式共创，不改成长表单。生成 `storyboard_plan.json` 时，不要只写笼统的 `visual/camera`；参考 `references/professional-storyboard-enrichment.md`，人物层补齐 `facial_features`、`hair`、`makeup`、`body_features`、`shoes`、`accessories`、`immutable_features`，用于六视图人物参考板；分镜层补齐 `shot_size`、`camera_movement`、`angle_offset`、`composition`、`lighting`、`character_action`、`micro_expression`、`scene_prompt`、`prop_prompts`、`audio.voice/bgm/sfx`。这些信息必须来自已确认剧本/品牌/素材，不要凭空编造产品外观或人物真实特征。
 5. **看图确认闸门**：gpt-image-2 成功后，必须优先打开/展示返回 JSON 里的 `preview_html`；如果当前宿主对 HTML 或本地路径渲染异常，再读取 `embedded_md` 或 `index_md` 给客户看。不要只贴 JSON、不要只贴相对路径、不要让客户自己去文件夹找。客户看不到图时，提供绝对路径及该宿主可执行的打开文件方式。
+
+5a. **进度查看闸门**：当客户只需要知道“现在做到哪一步了”时，不要追问 `client / run-id`。优先自动绑定当前 run，然后只告诉客户一个可看的入口：`workflow_canvas.html` 或 `workflow_canvas.py serve` 打开的本地地址；**必须把这个入口在回复里说清楚**，不要只说“已完成自检/继续往下走”。如果当前已经在故事板阶段，也可补充 `storyboard_preview.html`。客户的交互直接写进 canvas 历史，不要让客户来回找文件。
 6. **12格故事板转视频闸门**：客户确认故事板后，出视频必须使用最终 `shot_*.jpg` 16:9、4x3、12格故事板作为主要视觉参考。客户提供明确产品素材时，还必须先生成并确认产品 3x3 九宫格多角度产品板；正式出片将产品方位图与已确认产品板一起作为一致性锚。人物、产品、场景不得只靠 seed 保持一致，必须使用确认参考图。调用 `video_engine.py` 时开启 `--storyboard-ref`，或在 `segments.json` 每段写 `"storyboard_ref": true`。同一连续动作优先使用视频延长，只有运镜或动作明显变化才拆段并使用 `--chain`。硬性要求：严格保持角色/产品/场景/光线/故事顺序一致；不要整图生成；不要把12格当作一张图动画化；必须按照第 1 格到第 12 格分镜顺序生成连续视频；不要添加额外角色；不要改变剧情、服装、道具、产品外观和场景关系。
 7. **本地零模型**：抠像/人景融合/候选评分全走 BasicRouter 外部模型；本地只做提示词打磨 + ffmpeg 拼接。
 8. **诚实**：口型/粤语发音需人工试听、人景融合边缘靠提示词质量+best-of-N 改善，不本地补救，不编造结果。

@@ -61,6 +61,30 @@ def _node(node_id, label, kind, state="unknown", detail=""):
             "state": _normal_state(state), "detail": detail}
 
 
+def _norm_tag(value):
+    return str(value or "").strip().lower().lstrip("@").replace("-", "_")
+
+
+def _shot_ref_tags(shot):
+    tags = (shot or {}).get("ref_tags") or []
+    if isinstance(tags, str):
+        tags = [tags]
+    return {_norm_tag(tag) for tag in tags if str(tag or "").strip()}
+
+
+def _board_matches_shot(board_key, shot):
+    tags = _shot_ref_tags(shot)
+    if not tags:
+        return False
+    if board_key == "cast_board":
+        return bool(tags & {"mina", "host", "cast", "character", "actor"})
+    if board_key == "product_board":
+        return any(tag.startswith("product") or tag in {"hero", "angle"} for tag in tags)
+    if board_key == "product_usage_image":
+        return any(tag in {"usage", "product_usage", "product_use"} for tag in tags)
+    return False
+
+
 def build_graph(manifest=None, storyboard_result=None, segments_spec=None):
     """Build serializable nodes and edges from available production artifacts."""
     manifest = manifest or {}
@@ -79,18 +103,18 @@ def build_graph(manifest=None, storyboard_result=None, segments_spec=None):
         ("product_board", "Product board"),
         ("product_usage_image", "Product-use board"),
     )
-    board_ids = []
+    board_ids = {}
     for key, label in boards:
         board = storyboard_result.get(key) or {}
         if board:
             board_id = "board:%s" % key
             add(_node(board_id, label, "board", board.get("status"),
                       board.get("abspath") or board.get("path") or ""))
-            board_ids.append(board_id)
+            board_ids[key] = board_id
         elif key in (manifest.get("generation") or {}) or key in (manifest.get("approvals") or {}):
             board_id = "board:%s" % key
             add(_node(board_id, label, "board", _stage_state(manifest, key)))
-            board_ids.append(board_id)
+            board_ids[key] = board_id
 
     shot_ids = []
     for index, item in enumerate(storyboard_result.get("shots") or [], 1):
@@ -101,8 +125,9 @@ def build_graph(manifest=None, storyboard_result=None, segments_spec=None):
         add(_node(node_id, "Storyboard shot %s" % shot_key, "shot", state,
                   item.get("abspath") or item.get("path") or ""))
         shot_ids.append(shot_key)
-        for board_id in board_ids:
-            edges.append((board_id, node_id))
+        for board_key, board_id in board_ids.items():
+            if _board_matches_shot(board_key, shot):
+                edges.append((board_id, node_id))
 
     segments = segments_spec.get("segments") or []
     task_states = {str(task.get("unit_id")): task.get("status")
@@ -116,6 +141,12 @@ def build_graph(manifest=None, storyboard_result=None, segments_spec=None):
         add(_node(node_id, "Video segment %s" % segment_key, "segment", state,
                   segment.get("out_path") or ""))
         segment_ids.append(node_id)
+        for ref in segment.get("references") or []:
+            if not isinstance(ref, dict):
+                continue
+            ref_type = _norm_tag(ref.get("type"))
+            if ref_type == "product_usage_identity" and board_ids.get("product_usage_image"):
+                edges.append((board_ids["product_usage_image"], node_id))
         source_ids = segment.get("source_shot_ids") or [segment.get("source_shot_id") or segment_key]
         for source_id in source_ids:
             shot_id = "shot:%s" % source_id

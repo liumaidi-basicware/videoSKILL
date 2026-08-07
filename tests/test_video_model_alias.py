@@ -16,7 +16,7 @@ class VideoModelAliasTests(unittest.TestCase):
         with mock.patch.object(br_client, "list_video_models", return_value=[]):
             self.assertEqual(
                 br_client._legacy_video_model_name("dreamina-seedance-2-0-260128"),
-                "seedance-2.0")
+                "seedance-2.0-VS-white")
 
     def test_live_catalog_name_wins_over_fallback(self):
         with mock.patch.object(br_client, "list_video_models", return_value=[{
@@ -24,7 +24,7 @@ class VideoModelAliasTests(unittest.TestCase):
         }]):
             self.assertEqual(
                 br_client._legacy_video_model_name("canonical-seedance"),
-                "seedance-2.0")
+                "seedance-2.0-VS-white")
 
     def test_legacy_candidates_prefer_provider_model_name_over_internal_id(self):
         with mock.patch.object(br_client, "list_video_models", return_value=[{
@@ -64,12 +64,12 @@ class VideoModelAliasTests(unittest.TestCase):
         with mock.patch.object(br_client, "API_MODE", "v1"), \
              mock.patch.object(br_client, "list_video_models", return_value=[{
                 "modelId": "dreamina-seedance-2-0-260128",
-                "modelName": "seedance-2.0",
+                "modelName": "seedance-2.0-VS-white",
         }]), mock.patch.object(br_client, "_request", side_effect=request):
             self.assertEqual(br_client.create_video(
                 "sk-test", "hello", model="dreamina-seedance-2-0-260128"),
                 "task-seedance")
-        self.assertEqual(calls[0]["model"], "seedance-2.0")
+        self.assertEqual(calls[0]["model"], "seedance-2.0-VS-white")
 
     def test_create_video_retries_with_sibling_kling_submission_name_on_model_not_found(self):
         calls = []
@@ -94,6 +94,11 @@ class VideoModelAliasTests(unittest.TestCase):
             ("kling-v3-omni", mock.ANY),
         ])
         self.assertNotEqual(calls[0][1], calls[1][1])
+
+    def test_seedance_candidates_use_only_vs_white(self):
+        self.assertEqual(
+            br_client._legacy_video_model_candidates("seedance-2.0"),
+            ["seedance-2.0-VS-white"])
 
     def test_kling_model_check_does_not_query_catalog(self):
         with mock.patch.object(br_client, "list_video_models", return_value=[]), \

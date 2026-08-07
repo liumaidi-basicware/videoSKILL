@@ -801,11 +801,18 @@ def polish(plan, stage, api_key=None, model="qwen3.6-plus"):
         result.update({"shot_id": item["shot_id"], "stage": stage,
                        "source_prompt_zh": item["source_prompt_zh"]})
         polished.append(result)
-    return {"status": "pending", "stage": stage, "model": model,
+    review = {"status": "pending", "stage": stage, "model": model,
             "plan_fingerprint": plan_fingerprint(plan),
             "visual_plan_fingerprint": visual_plan_fingerprint(plan),
             "prompts": polished,
             "created_at": datetime.now().isoformat(timespec="seconds")}
+    # Storyboard rendering validates both shot prompts and the non-shot assets
+    # it may need to create (product board, cast board, usage image). Keep both
+    # contracts in the same review artifact so the documented polish -> confirm
+    # workflow cannot produce a review that is confirmed but unusable.
+    if stage == "storyboard":
+        review["asset_prompts"] = storyboard.asset_prompt_review_items(plan)
+    return review
 
 
 def save_pending(review, path):

@@ -91,6 +91,35 @@ class ReferenceHandoffContractTests(unittest.TestCase):
         self.assertEqual(shot["ref_tags"],
                          ["@mina", "@product_hero", "@product_angle"])
 
+    def test_collect_references_respects_requires_usage_false_contract(self):
+        shot = {
+            "id": "s1",
+            "visual": "hand magnetically attaches the speaker to the phone back",
+            "requires_usage": False,
+            "ref_tags": ["@product_hero"],
+        }
+        plan_refs = {"reference_registry": [
+            {"tag": "@product_hero", "url": "/confirmed/product.jpg", "type": "product_board"},
+            {"tag": "@usage", "url": "/confirmed/usage.jpg", "type": "product_usage_identity"},
+        ]}
+        references, _ = script_splitter._collect_typed_references(
+            shot, plan_refs, "/confirmed/storyboard.jpg")
+        self.assertNotIn("product_usage_identity", {item["type"] for item in references})
+
+    def test_collect_references_legacy_usage_fallback_when_contract_absent(self):
+        shot = {
+            "id": "s1",
+            "visual": "hand magnetically attaches the speaker to the phone back",
+            "ref_tags": ["@product_hero"],
+        }
+        plan_refs = {"reference_registry": [
+            {"tag": "@product_hero", "url": "/confirmed/product.jpg", "type": "product_board"},
+            {"tag": "@usage", "url": "/confirmed/usage.jpg", "type": "product_usage_identity"},
+        ]}
+        references, _ = script_splitter._collect_typed_references(
+            shot, plan_refs, "/confirmed/storyboard.jpg")
+        self.assertIn("product_usage_identity", {item["type"] for item in references})
+
     def test_storyboard_shot_map_prefers_remote_url_for_video_refs(self):
         mapping = script_splitter._storyboard_shot_map({
             "shots": [{

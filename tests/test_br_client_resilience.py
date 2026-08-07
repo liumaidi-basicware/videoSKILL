@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 import urllib.error
+import ssl
 from unittest import mock
 
 
@@ -55,12 +56,72 @@ class RequestRetryTests(unittest.TestCase):
                 br_client._request("POST", "/paid", body={}, max_retries=4)
         self.assertEqual(opened.call_count, 1)
 
+    def test_insufficient_credit_5xx_is_terminal_and_not_retried(self):
+        error = urllib.error.HTTPError(
+            "https://x", 500, "credit", {},
+            io.BytesIO(b'{"code":500,"message":"Insufficient credit"}'))
+        with mock.patch.object(br_client.urllib.request, "urlopen",
+                               side_effect=error) as opened, \
+             mock.patch.object(br_client.time, "sleep") as slept:
+            with self.assertRaisesRegex(br_client.BRError, "Insufficient credit"):
+                br_client._request("POST", "/paid", body={},
+                                   idempotency_key="req-credit", max_retries=4)
+        self.assertEqual(opened.call_count, 1)
+        slept.assert_not_called()
+
+    def test_insufficient_credit_classifier_handles_business_error_text(self):
+        error = br_client.BRError(
+            "HTTP 500: {\"message\":\"Insufficient credit\"}",
+            payload={"message": "Insufficient credit"}, http_status=500)
+        self.assertTrue(br_client.is_insufficient_credit(error))
+
     def test_connection_error_is_wrapped_without_retry_for_unkeyed_post(self):
         with mock.patch.object(br_client.urllib.request, "urlopen",
                                side_effect=ConnectionResetError("reset")) as opened:
             with self.assertRaisesRegex(br_client.BRError, "network error: reset"):
                 br_client._request("POST", "/paid", body={}, max_retries=4)
         self.assertEqual(opened.call_count, 1)
+
+    def test_tls_runtime_error_uses_curl_fallback_without_retrying_urllib(self):
+        tls_error = urllib.error.URLError(
+            ssl.SSLEOFError(8, "EOF occurred in violation of protocol"))
+        expected = {"code": 200, "data": {"ok": True}}
+        with mock.patch.object(br_client.urllib.request, "urlopen",
+                               side_effect=tls_error) as opened, \
+             mock.patch.object(br_client, "_curl_json_request",
+                               return_value=expected) as fallback:
+            result = br_client._request("POST", "/v1/chat/completions",
+                                        api_key="sk-secret", body={"x": 1})
+        self.assertEqual(result, expected)
+        self.assertEqual(opened.call_count, 1)
+        args = fallback.call_args.args
+        self.assertEqual(args[0], "POST")
+        self.assertEqual(args[2]["Authorization"], "Bearer sk-secret")
+
+    def test_curl_fallback_keeps_secret_out_of_process_arguments(self):
+        observed = {}
+
+        def fake_run(command, **_kwargs):
+            observed["command"] = command
+            config_path = command[command.index("--config") + 1]
+            observed["mode"] = os.stat(config_path).st_mode & 0o777
+            with open(config_path, encoding="utf-8") as handle:
+                observed["config"] = handle.read()
+            response_path = command[command.index("--output") + 1]
+            with open(response_path, "w", encoding="utf-8") as handle:
+                handle.write('{"code":200,"data":{}}')
+            return mock.Mock(returncode=0, stdout=b"200", stderr=b"")
+
+        with mock.patch.object(br_client.shutil, "which", return_value="/usr/bin/curl"), \
+             mock.patch.object(br_client.subprocess, "run", side_effect=fake_run):
+            result = br_client._curl_json_request(
+                "POST", "https://api.basicrouter.ai/api/v1/chat/completions",
+                {"Authorization": "Bearer sk-secret", "Content-Type": "application/json"},
+                b'{}', 30)
+        self.assertEqual(result["code"], 200)
+        self.assertNotIn("sk-secret", " ".join(observed["command"]))
+        self.assertIn("sk-secret", observed["config"])
+        self.assertEqual(observed["mode"], 0o600)
 
     def test_keyed_post_retries_with_same_header(self):
         responses = [ConnectionResetError("reset"),
@@ -81,9 +142,11 @@ class RequestRetryTests(unittest.TestCase):
 
     def test_create_apis_forward_stable_or_explicit_request_id(self):
         calls = []
+        bodies = []
 
         def request(_method, path, **kwargs):
             calls.append((path, kwargs["idempotency_key"]))
+            bodies.append(kwargs.get("body") or {})
             if path == "/ai/createImage":
                 return {"code": 200, "data": {"imageUrls": ["https://x/image"]}}
             return {"code": 200, "data": {"taskId": "task-1"}}
@@ -99,6 +162,7 @@ class RequestRetryTests(unittest.TestCase):
             ("/v1/image-generations", "image-id"),
             ("/v1/video-generations", "video-id"),
         ])
+        self.assertEqual(bodies[-1]["model"], "seedance-2.0-VS-white")
 
 
 class AtomicDownloadTests(unittest.TestCase):

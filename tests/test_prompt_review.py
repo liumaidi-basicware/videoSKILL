@@ -1005,6 +1005,17 @@ class PromptReviewTests(unittest.TestCase):
         self.assertNotEqual(review["visual_plan_fingerprint"],
                             review["plan_fingerprint"])
 
+    def test_storyboard_polish_includes_asset_prompts_required_by_renderer(self):
+        response = '{"prompt_zh":"提示词","negative_prompt_zh":"不要文字"}'
+        with mock.patch.object(prompt_review.key_setup, "load_key", return_value="sk-test"), \
+             mock.patch.object(prompt_review.br_client, "chat", return_value=response):
+            review = prompt_review.polish(self.plan, "storyboard", model="review-model")
+        self.assertTrue(review.get("asset_prompts"))
+        self.assertEqual(
+            {item["asset_id"] for item in review["asset_prompts"]},
+            {item["asset_id"] for item in storyboard.asset_prompt_review_items(self.plan)},
+        )
+
     def test_storyboard_prompt_uses_plan_product_name_and_character_scope(self):
         plan = {"product_name": "1-Vibe Go Lite 马卡龙磁吸无线音箱", "model": "BS8"}
         no_human = {"id": "s1", "dialogue": "台词", "visual": "产品特写", "characters": []}

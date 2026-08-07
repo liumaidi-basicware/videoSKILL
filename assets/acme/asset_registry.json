@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "assets": {
+    "cast:cast-source": {
+      "kind": "cast",
+      "source_fingerprint": "cast-source",
+      "path": "/var/folders/t_/3nmc9mtd28gf557jpkvtf64w0000gn/T/tmpg5uood9n/cast_board.jpg",
+      "board_sha256": "e5b2ce7e40a6ee6126da6ab902569309b62e6ec17c984ed33e642db7be59baf9",
+      "model": "gpt-image-2",
+      "confirmed_at": "2026-08-07T16:17:19",
+      "url": "https://cdn.example/cast.png"
+    },
+    "cast:src": {
+      "kind": "cast",
+      "source_fingerprint": "src",
+      "path": "/var/folders/t_/3nmc9mtd28gf557jpkvtf64w0000gn/T/tmp44uyvmm8/cast_board.jpg",
+      "board_sha256": "4c4b6a3be1314ab86138bef4314dde022e600960d8689a2c8f8631802d20dab6",
+      "model": "gpt-image-2",
+      "confirmed_at": "2026-08-07T17:36:06",
+      "url": "https://cdn.example/cast.png",
+      "task_id": "img-cast",
+      "request_id": "req-cast"
+    },
+    "cast:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855": {
+      "kind": "cast",
+      "source_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "path": "/var/folders/t_/3nmc9mtd28gf557jpkvtf64w0000gn/T/tmps4i7j6z4/storyboard/run-1/cast_board.jpg",
+      "board_sha256": "4c4b6a3be1314ab86138bef4314dde022e600960d8689a2c8f8631802d20dab6",
+      "model": "gpt-image-2",
+      "confirmed_at": "2026-08-07T17:36:06",
+      "url": "https://cdn.example/old-cast.png"
+    }
+  }
+}

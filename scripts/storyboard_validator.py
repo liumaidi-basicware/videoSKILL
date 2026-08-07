@@ -17,6 +17,22 @@ TEXT_IN_FRAME = re.compile(
     r"floating slogan|on-screen text|text overlay|lower third",
     re.I,
 )
+
+# A storyboard prompt must explicitly forbid generated text. Those negative
+# constraints contain the same words as a positive request (for example
+# "无字幕、无文字"), so applying TEXT_IN_FRAME directly creates false
+# blockers. Remove prohibition clauses before checking for requested overlays.
+NEGATED_TEXT_CLAUSE = re.compile(
+    r"(?:无|不要|禁止|不得|严禁|不生成|不出现|避免|不能)[^，。；;,.!?！？\n]{0,12}"
+    r"(?:字幕|文字|水印|slogan|kinetic typography|悬浮文字|字幕条|参数标签|数据卡片)",
+    re.I,
+)
+
+
+def has_positive_text_request(value):
+    """Return whether prompt text asks the image model to draw text."""
+    text = NEGATED_TEXT_CLAUSE.sub("", str(value or ""))
+    return bool(TEXT_IN_FRAME.search(text))
 WEAK_VISUAL = re.compile(r"高级感|好看|震撼|电影感|氛围感|premium|cinematic", re.I)
 REFERENCE_TYPES = {"character_identity", "product_identity", "scene_environment",
                    "storyboard_composition", "continuation_frame", "generic_visual",
@@ -92,7 +108,7 @@ def validate_plan(plan):
             if not shot.get(field):
                 warnings.append("shot %s 缺少 %s" % (sid, field))
         prompt_fields = [shot.get(k, "") for k in ("visual", "scene_prompt", "prop_prompts")]
-        if TEXT_IN_FRAME.search(" ".join(str(v) for v in prompt_fields)):
+        if has_positive_text_request(" ".join(str(v) for v in prompt_fields)):
             errors.append("shot %s 的画面提示词疑似要求生成文字，应迁移到 motion_elements" % sid)
         if not (shot.get("character_action") or shot.get("action") or shot.get("visual")):
             warnings.append("shot %s 缺少动作描述" % sid)
