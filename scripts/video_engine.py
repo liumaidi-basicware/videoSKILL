@@ -28,6 +28,7 @@ import json
 import argparse
 import tempfile
 import hashlib
+import datetime as _dt
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -41,6 +42,9 @@ import take_review           # noqa: E402
 import media_qc              # noqa: E402
 import run_manifest as _rm   # noqa: E402 — hoisted from 12 inline imports (v3 cleanup)
 import cost_ledger          # noqa: E402 — v3 cost tracking in _persist_task
+import schema_validate      # noqa: E402 — v5 契约运行时校验（reference-contract）
+import policy_check         # noqa: E402 — v5 集中化闸门策略（policies/gates.json）
+import obs_log              # noqa: E402 — v5 结构化事件日志（run_id 全链 trace）
 from video_models import (   # noqa: E402 — v4 shim: identical functions extracted
     _available_models_set, _catalog_bool, _catalog_list, _catalog_submission_names,
     _integrated_audio_value, _is_kling_video_model, _model_catalog,
@@ -90,6 +94,23 @@ def _reference_is_trusted(client, value, manifest=None):
     return False
 
 
+def _trusted_remote_segment_reference(segment, value):
+    if not isinstance(value, str) or not value.startswith(("http://", "https://")):
+        return False
+    trusted_sources = {
+        "storyboard",
+        "asset_refs.product_usage_images",
+        "asset_refs.cast_boards",
+        "asset_refs.product_boards",
+    }
+    for ref in segment.get("references") or []:
+        if not isinstance(ref, dict) or ref.get("url") != value:
+            continue
+        if ref.get("source") in trusted_sources:
+            return True
+    return False
+
+
 def _validate_references(segments, client, manifest, draft=False):
     if draft:
         return
@@ -107,7 +128,9 @@ def _validate_references(segments, client, manifest, draft=False):
             except Exception as error:
                 raise ValueError("PRODUCT_SKU_RESOLVE_FAILED: %s (%s)" %
                                  (seg["product_sku"], error))
-        bad = [ref for ref in refs if not _reference_is_trusted(client, ref, manifest)
+        bad = [ref for ref in refs
+               if not _trusted_remote_segment_reference(seg, ref)
+               and not _reference_is_trusted(client, ref, manifest)
                and (not isinstance(ref, str) or not os.path.isfile(ref)
                     or os.path.abspath(ref) not in product_refs)]
         if bad:
@@ -131,6 +154,15 @@ def _validate_reference_handoff(segments):
                 "REFERENCE_HANDOFF_INCOMPLETE: segment %s 缺少已确认参考图类型 [%s]。"
                 "视频请求已阻断；不能把产品使用板、人物板、产品板或故事板静默丢弃。"
                 % (seg.get("id") or "unknown", detail))
+        # 契约强制：完整 typed reference（带 url/id 的正式交接条目）必须满足
+        # reference-contract schema。仅含 type 的极简条目由上面的必需类型检查覆盖，
+        # 不按完整契约苛求（兼容旧版 segments 文件）。
+        for ref in seg.get("references") or []:
+            if isinstance(ref, dict) and (ref.get("url") or ref.get("id")):
+                schema_validate.enforce(
+                    ref, "reference-contract",
+                    context="video_engine._validate_reference_handoff:%s"
+                            % (seg.get("id") or "unknown"))
 
 
 def _validate_model_reference_capacity(model, reference_count, *, formal):
@@ -240,7 +272,7 @@ def _persist_task(manifest, manifest_path, ledger_path, task, status, **fields):
                                        task_id=task.get("task_id"), attempt=attempt, **fields)
     if manifest is not None:
         for name in ("request_id", "dependency_fingerprint", "generation_dependency",
-                     "supersedes"):
+                      "supersedes", "storyboard_panel", "source_segment"):
             if task.get(name) is not None and name not in fields:
                 fields[name] = task[name]
         _rm.upsert_task(manifest, dict(stage="video", unit_id=task.get("segment", {}).get("id"),
@@ -258,12 +290,15 @@ def _record_task_resume(manifest, manifest_path, ledger_path, task):
             unit_id=task.get("segment", {}).get("id"), task_id=task.get("task_id"),
             handoff_fingerprint=task.get("handoff_fingerprint"))
     if manifest is not None:
-        _rm.upsert_task(manifest, {"stage": "video",
-                                   "unit_id": task.get("segment", {}).get("id"),
-                                   "handoff_fingerprint": task.get("handoff_fingerprint"),
-                                    "task_id": task.get("task_id"), "model": task.get("model"),
-                                    "attempt": task.get("attempt", 1),
-                                    "status": "running"})
+        resumed = {"stage": "video",
+                   "unit_id": task.get("segment", {}).get("id"),
+                   "handoff_fingerprint": task.get("handoff_fingerprint"),
+                   "task_id": task.get("task_id"), "model": task.get("model"),
+                   "attempt": task.get("attempt", 1),
+                   "status": "running"}
+        if task.get("source_segment") is not None:
+            resumed["source_segment"] = task["source_segment"]
+        _rm.upsert_task(manifest, resumed)
         if manifest_path:
             _rm.save_manifest(manifest, manifest_path)
 
@@ -460,6 +495,45 @@ def _model_supports_type(model, video_type):
     return int(video_type) in caps
 
 
+def _model_integrated_audio(model_id, record=None):
+    candidates = [model_id]
+    if record:
+        candidates.extend(record.get("aliases") or [])
+        candidates.extend(record.get("submission_names") or [])
+    for name in candidates:
+        value = VIDEO_MODEL_INTEGRATED_AUDIO.get(str(name))
+        if value is not None:
+            return value
+    lowered = " ".join(str(name).lower() for name in candidates)
+    if "seedance" in lowered or "kling-v3-omni" in lowered:
+        return True
+    if "wan" in lowered:
+        return False
+    return None
+
+
+def _video_image_ref(path_or_url, api_key=None, allow_local_draft=False):
+    """Prepare createVideo imageUrls without regenerating the reference image.
+
+    BasicRouter video docs define imageUrls as image material URLs. Local files
+    and data URLs are not accepted here: confirmed images must carry forward the
+    URL returned by /v1/image-generations/{taskId}. Do not call image generation
+    as a pseudo-hosting/upload service because that can redraw confirmed assets.
+
+    Draft/test mode may still adapt local paths through br_client.to_image_ref so
+    old offline tests can exercise routing without hitting the paid video API.
+    That escape hatch must never be used by formal generation.
+    """
+    value = str(path_or_url or "").strip()
+    if value.startswith(("http://", "https://")):
+        return value
+    if allow_local_draft:
+        return br_client.to_image_ref(value, api_key=api_key)
+    raise ValueError(
+        "VIDEO_IMAGE_URL_REQUIRED: createVideo imageUrls must be HTTP(S) URLs "
+        "returned by BasicRouter image retrieve, got %s" % (value[:120] or "<empty>"))
+
+
 def _pick_video_model(preferred=None, video_type=None, dialogue=None, formal=False,
                       allow_fallback=True, reference_count=None, exclude_models=None):
     """按可用性 + videoType 能力从 VIDEO_MODEL_FALLBACK 选第一个可用模型。
@@ -501,12 +575,12 @@ def _pick_video_model(preferred=None, video_type=None, dialogue=None, formal=Fal
             # known models, omission falls back to the maintained capability
             # contract; an explicit catalog false value still wins.
             if integrated_audio is None:
-                integrated_audio = VIDEO_MODEL_INTEGRATED_AUDIO.get(model_id)
+                integrated_audio = _model_integrated_audio(model_id, record)
             eligible = (record["active"] and not record["conflict"] and
                         supports_type and supports_reference_count)
         else:
             eligible = _model_supports_type(model_id, video_type)
-            integrated_audio = VIDEO_MODEL_INTEGRATED_AUDIO.get(model_id)
+            integrated_audio = _model_integrated_audio(model_id)
             if available:
                 eligible = eligible and model_id in available
         if eligible and not (formal and dialogue and integrated_audio is not True):
@@ -530,44 +604,47 @@ DEFAULT_NEGATIVE = ("模糊, 畸形, 多余手指, 手部畸形, 面部扭曲, �
                     "字幕, 文字, 悬浮文字, kinetic typography, 逐字动画文字, 数据标签快闪, "
                     "字幕条, 说明文字, slogan文字, 低分辨率, 噪点, 抖动, 画面撕裂, 多余肢体, 变形")
 
-STORYBOARD_VIDEO_RULES = """
-【12格故事板转视频硬性规则】
-Use the uploaded FINAL 16:9 4x3 twelve-panel storyboard contact sheet as the primary visual reference.
-The storyboard is a monochrome pencil/charcoal PREVIS for composition only, not the finished visual style.
-The generated video MUST be photorealistic live-action / realistic commercial footage with natural skin,
-real materials, real lighting and believable product scale. NEVER render the video as a sketch, pencil drawing,
-charcoal drawing, illustration, monochrome storyboard, comic, anime or contact sheet.
-【导演标注颜色系统：必须读取并执行，但绝不渲染标注本身】
-The storyboard contains director annotation marks. You MUST read each annotation and translate it into
-the corresponding live-action camera movement, body motion, lighting change, or emotional beat:
-RED arrows = body / subject movement direction and intensity. Follow the arrow direction for subject motion.
-A red arrow pointing left means the subject moves left; a curved red arrow means the subject rotates.
-BLUE arrows = camera movement direction and speed. Follow the blue arrow for camera motion.
-A blue arrow pushing in means dolly/push in; a blue arc means orbit/pan; a blue arrow pulling back means pull out.
-GREEN marks = framing and composition notes. Use these to determine shot size, angle, and subject placement.
-ORANGE marks = lighting direction and quality. Use these to determine where light comes from and its intensity.
-PURPLE marks = sound and emotional emphasis. Use these to time the emotional peak and sync with dialogue delivery.
-BLACK text = short shot notes and panel labels. Use these as beat timing and transition cues.
-These annotations are MANDATORY motion/framing/lighting instructions, not optional suggestions.
-Every annotation must be reflected in the generated video's actual camera work and subject movement.
-Do NOT render any arrows, colored marks, annotation strokes, panel labels or storyboard notes in the final video.
-Strictly keep the character / product / scene / lighting / story order consistent.
-Do NOT animate the whole 12-panel image as a single flat picture.
-Do NOT treat the twelve-panel grid itself as the video frame.
-Generate continuous video following panel 1 → panel 2 → panel 3 → panel 4 → panel 5 → panel 6 → panel 7 → panel 8 → panel 9 → panel 10 → panel 11 → panel 12 in order.
-Preserve the visible body momentum and camera-motion intent from every panel.
-Do NOT add extra characters.
-Do NOT change the plot.
-Do NOT change wardrobe, props, product appearance, spatial relationships, scene layout, or lighting direction.
-If this is part of a stitched multi-segment video, keep the same character identity, voice tone, background scene, lighting style, and BGM mood across all segments.
-Maintain edit-friendly coverage: adjacent beats should still show 30°–50° camera/subject angle offsets or clear wide/medium/close-up variation.
+NATIVE_STORYBOARD_VIDEO_RULES = """
+【Seedance 原生故事板转视频规则】
+Use the uploaded FINAL storyboard/contact sheet as Seedance-native storyboard guidance for this clip.
+Follow the specified current segment, panel index, director text, dialogue, timeline, references and continuity contract.
+Read the storyboard as a previs guide for composition, shot order, camera movement, action beats and lighting, but never render the grid, panel borders, labels, arrows, notes, text, subtitles or watermark.
+Annotation legend for reading only: RED arrows = body / subject movement; BLUE arrows = camera movement; GREEN marks = framing and composition notes; ORANGE marks = lighting direction; PURPLE marks = sound and emotional emphasis; BLACK text = short shot notes and panel labels. Do NOT render any arrows, marks, labels or notes.
+The storyboard may be monochrome previs; final output must be photorealistic live-action, full-color commercial footage with real materials, natural lighting and clean camera motion. NEVER render the video as a sketch, pencil drawing, charcoal drawing, storyboard panel, animatic, comic strip or grayscale previs.
+Strictly preserve the confirmed product, character when present, props, spatial relationship, wardrobe, voice, BGM mood and lighting. Do not add extra characters or change the plot.
 """.strip()
+
+PANEL_REFERENCE_VIDEO_RULES = """
+【单镜头展开图转视频规则】
+Use the uploaded SINGLE 16:9 reference plate as this clip's composition, motion and lighting guide.
+It is one expanded frame prepared from the customer-approved plan, not a multi-panel board and not a grid.
+Generate only this clip's described action. Do NOT infer other panels, animate a contact sheet, create split-screen panels, or render any annotation marks.
+The reference plate may be monochrome or previs-like; the final video MUST be photorealistic live-action, full-color commercial footage with real materials, natural lighting, believable product scale and clean camera motion. NEVER render the video as a sketch, pencil drawing, charcoal drawing, storyboard panel, animatic, comic strip or grayscale previs.
+Strictly preserve the uploaded confirmed product, character when present, props, spatial relationships and scene lighting. Do not add text, subtitles, logos, extra characters, arrows, labels or watermark.
+""".strip()
+
+# Backward-compatible export used by older imports. Seedance can use native
+# storyboard guidance; non-Seedance fallback uses the single-panel rules.
+STORYBOARD_VIDEO_RULES = NATIVE_STORYBOARD_VIDEO_RULES
 
 
 def _storyboard_video_text(text, enabled=False):
     if not enabled:
         return text
-    return STORYBOARD_VIDEO_RULES + "\n\n【本段台词/剧情】\n" + (text or "")
+    return PANEL_REFERENCE_VIDEO_RULES + "\n\n【本段台词/剧情】\n" + (text or "")
+
+
+def _uses_native_storyboard_prompt(segment, model):
+    mode = str(segment.get("storyboard_ref_mode") or "").strip().lower()
+    if mode in ("expanded_panel", "single_panel", "single_shot_keyframe"):
+        return False
+    return (not mode or mode in ("native_storyboard", "contact_sheet", "storyboard_contact_sheet")) \
+        and seedance_prompt.is_seedance_model(model)
+
+
+def _storyboard_rules_for_model(segment, model):
+    return (NATIVE_STORYBOARD_VIDEO_RULES if _uses_native_storyboard_prompt(segment, model)
+            else PANEL_REFERENCE_VIDEO_RULES)
 
 
 def _compile_seedance_text(segment, model):
@@ -585,8 +662,11 @@ def _compile_seedance_text(segment, model):
         return segment.get("text", "")
     prompt_model = ("kling-v3-omni-video" if _is_kling_video_model(model)
                     else model)
+    prompt_segment = dict(segment)
+    prompt_segment["storyboard_ref"] = False
+    prompt_segment.pop("storyboard_ref_mode", None)
     return seedance_prompt.compile_prompt(
-        segment, segment.get("references") or segment.get("reference_roles") or [],
+        prompt_segment, segment.get("references") or segment.get("reference_roles") or [],
         style=segment.get("style"), negative=segment.get("negative_prompt"),
         target_model=prompt_model)
 
@@ -597,19 +677,57 @@ def _privacy_fallback_allowed(model, video_type, ref_urls, allow_fallback=True):
             and _model_supports_type("kling-v3-omni-video", video_type))
 
 
+def _model_prompt_keys(model):
+    keys = [str(model)]
+    if seedance_prompt.is_seedance_model(model):
+        keys.append("seedance")
+    if _is_kling_video_model(model):
+        keys.append("kling")
+    return list(dict.fromkeys(key for key in keys if key))
+
+
+def _same_prompt_model(approved_model, model):
+    return bool(set(_model_prompt_keys(approved_model)) & set(_model_prompt_keys(model)))
+
+
+def _approved_submission_for_model(segment, model):
+    by_model = segment.get("approved_submission_prompts_by_model") or {}
+    if isinstance(by_model, dict):
+        for key in _model_prompt_keys(model):
+            prompt = by_model.get(key)
+            if prompt:
+                return prompt
+    approved_submission = segment.get("approved_submission_prompt_zh")
+    approved_model = segment.get("approved_prompt_model")
+    if approved_submission and (not approved_model or _same_prompt_model(approved_model, model)):
+        return approved_submission
+    return None
+
+
+def _assert_confirmed_submission_for_model(segment, model):
+    has_confirmed_submission = bool(
+        segment.get("approved_submission_prompt_zh") or
+        segment.get("approved_submission_prompts_by_model"))
+    if has_confirmed_submission and not _approved_submission_for_model(segment, model):
+        raise ValueError(
+            "PROMPT_REVIEW_REQUIRED_FOR_MODEL: 镜头 %s 缺少模型 %s 的已确认完整视频提交提示词" %
+            (segment.get("id"), model))
+
+
 def _submission_text(segment, model, storyboard_ref=False, extend_url=None):
     """Compile from original segment for the target model, never from another model's prompt.
 
-    storyboard_ref=True 时，STORYBOARD_VIDEO_RULES 必须始终存在——即使
-    approved_prompt_zh 已由 prompt_review 确认。否则模型会把故事板的
-    素描风格/网格布局当作画面内容渲染进成片（真实故障模式）。
+    storyboard_ref=True 时必须按目标模型选择故事板规则。Seedance 可走原生
+    storyboarding；Kling 等不稳定支持故事板的模型必须走单镜头展开图。
     """
+    approved_submission = _approved_submission_for_model(segment, model)
+    if approved_submission and not extend_url:
+        return _fit_video_prompt_limit(approved_submission, segment, model)
+    if not extend_url:
+        _assert_confirmed_submission_for_model(segment, model)
     base_text = segment.get("approved_prompt_zh") or _compile_seedance_text(segment, model)
     if storyboard_ref:
-        # Always prepend storyboard rules, even when approved_prompt_zh exists.
-        # The rules contain critical "NEVER render as sketch" and "Do NOT treat
-        # grid as video frame" instructions that must not be bypassed.
-        text = STORYBOARD_VIDEO_RULES + "\n\n【本段台词/剧情】\n" + base_text
+        text = _storyboard_rules_for_model(segment, model) + "\n\n【本段台词/剧情】\n" + base_text
     else:
         text = base_text
     if not segment.get("seedance_native", True):
@@ -630,6 +748,156 @@ def _submission_text(segment, model, storyboard_ref=False, extend_url=None):
     return _fit_video_prompt_limit(text, segment, model)
 
 
+def _expanded_storyboard_reference(api_key, segment):
+    """Create the high-resolution panel plate for one storyboard video unit."""
+    import storyboard
+    out_dir = segment.get("storyboard_dir") or os.path.dirname(
+        segment.get("storyboard_path") or "")
+    if not out_dir:
+        raise ValueError("STORYBOARD_PANEL_OUTPUT_DIR_MISSING: 镜头 %s 缺少故事板目录" %
+                         segment.get("id"))
+    expanded = storyboard.expand_storyboard_panel(api_key, segment, out_dir=out_dir)
+    path = expanded.get("abspath") or expanded.get("path")
+    if not path or not os.path.isfile(path):
+        raise ValueError("STORYBOARD_PANEL_EXPANSION_FAILED: 镜头 %s 未生成单格展开图" %
+                         segment.get("id"))
+    return expanded
+
+
+def _prepare_storyboard_panel_submission(api_key, segment, *, formal=False):
+    """Return a request segment plus its panel image and explicitly bound refs.
+
+    This is the sole adapter between an approved contact sheet and every video
+    entry point.  A contact sheet must never reach createVideo directly.
+    """
+    enabled = bool(segment.get("storyboard_ref") or segment.get("storyboard_ref_mode") or
+                   segment.get("use_storyboard_reference"))
+    if not enabled:
+        return dict(segment), list(segment.get("urls") or [])
+    required = ("storyboard_path", "storyboard_dir", "storyboard_panel_index")
+    missing = [key for key in required if not segment.get(key)]
+    if missing:
+        raise ValueError("STORYBOARD_PANEL_BINDING_REQUIRED: 镜头 %s 缺少 %s" %
+                         (segment.get("id") or "unknown", ", ".join(missing)))
+    tags = segment.get("ref_tags") or []
+    if isinstance(tags, str):
+        tags = [tags]
+    tagged = {ref.get("tag"): ref for ref in (segment.get("references") or [])
+              if isinstance(ref, dict) and ref.get("tag")}
+    unknown = [tag for tag in tags if tag not in tagged]
+    if unknown:
+        raise ValueError("STORYBOARD_PANEL_REFS_MISSING: 镜头 %s 的 ref_tags 无对应素材: %s" %
+                         (segment.get("id") or "unknown", ", ".join(unknown)))
+    if not tags:
+        raise ValueError("STORYBOARD_PANEL_REFS_MISSING: 镜头 %s 未声明 ref_tags" %
+                         (segment.get("id") or "unknown"))
+    declared_panel = segment.get("storyboard_panel") or {}
+    if formal:
+        approval = segment.get("storyboard_panel_approval") or {}
+        quality = segment.get("panel_quality") or {}
+        panel_path = declared_panel.get("path")
+        if not (approval.get("status") == "confirmed" and quality.get("pass") and
+                panel_path and os.path.isfile(panel_path)):
+            raise ValueError("PANEL_EXPANSION_APPROVAL_REQUIRED: 镜头 %s 的 Kling 单格展开图必须先完成 QA 与客户确认" %
+                             (segment.get("id") or "unknown"))
+        if artifact_contract.file_sha256(panel_path) != declared_panel.get("sha256"):
+            raise ValueError("STALE_STORYBOARD_PANEL: 镜头 %s 的展开图字节已变化" %
+                             segment.get("id"))
+    if declared_panel.get("path") and os.path.isfile(declared_panel["path"]):
+        expanded = {"abspath": declared_panel["path"],
+                    "url": declared_panel.get("url") or declared_panel.get("result_url"),
+                    "recipe_sha256": declared_panel.get("recipe_sha256")}
+    else:
+        expanded = _expanded_storyboard_reference(api_key, segment)
+    input_tags, omitted = _storyboard_budgeted_tags(segment)
+    expanded_url = expanded.get("url") or expanded.get("result_url")
+    urls = [expanded_url or expanded["abspath"]] + [tagged[tag]["url"] for tag in input_tags]
+    urls = list(dict.fromkeys(urls))
+    if len(urls) > 4:
+        # Do not silently drop a confirmed identity/product binding merely to
+        # satisfy a provider limit. The author must simplify the shot first.
+        raise ValueError("REFERENCE_COUNT_UNSUPPORTED: 镜头 %s 的单格展开图加 ref_tags 共 %d 张，超过网关上限 4。"
+                         % (segment.get("id") or "unknown", len(urls)))
+    panel_record = {
+        "path": expanded["abspath"], "sha256": artifact_contract.file_sha256(expanded["abspath"]),
+        "url": expanded_url,
+        "recipe_sha256": expanded.get("recipe_sha256"),
+        "panel_index": int(segment["storyboard_panel_index"]), "ref_tags": list(tags),
+    }
+    expected_recipe = artifact_contract.build_storyboard_panel_recipe(segment)
+    expected_recipe_sha = artifact_contract.sha256_json(expected_recipe)
+    if panel_record["recipe_sha256"] != expected_recipe_sha:
+        raise ValueError("STALE_STORYBOARD_PANEL: 镜头 %s 的展开图 recipe 与正式交接不一致" %
+                         segment.get("id"))
+    prepared = dict(segment, storyboard_ref_mode="expanded_panel",
+                    storyboard_panel=panel_record,
+                    storyboard_panel_path=expanded["abspath"], ref_tags=list(tags),
+                    image_input_ref_tags=list(input_tags),
+                    omitted_ref_tags=list(omitted))
+    return prepared, urls
+
+
+def _storyboard_tagged_references(segment):
+    tags = segment.get("ref_tags") or []
+    if isinstance(tags, str):
+        tags = [tags]
+    tagged = {ref.get("tag"): ref for ref in (segment.get("references") or [])
+              if isinstance(ref, dict) and ref.get("tag")}
+    unknown = [tag for tag in tags if tag not in tagged]
+    if unknown:
+        raise ValueError("STORYBOARD_PANEL_REFS_MISSING: 镜头 %s 的 ref_tags 无对应素材: %s" %
+                         (segment.get("id") or "unknown", ", ".join(unknown)))
+    if not tags:
+        raise ValueError("STORYBOARD_PANEL_REFS_MISSING: 镜头 %s 未声明 ref_tags" %
+                         (segment.get("id") or "unknown"))
+    return tags, tagged
+
+
+def _storyboard_budgeted_tags(segment):
+    budget = artifact_contract.storyboard_image_input_tags(segment)
+    return budget["selected"], budget["omitted"]
+
+
+def _prepare_native_storyboard_submission(segment):
+    """Seedance native path: pass the approved storyboard plus exact refs."""
+    required = ("storyboard_path", "storyboard_dir", "storyboard_panel_index")
+    missing = [key for key in required if not segment.get(key)]
+    if missing:
+        raise ValueError("STORYBOARD_NATIVE_BINDING_REQUIRED: 镜头 %s 缺少 %s" %
+                         (segment.get("id") or "unknown", ", ".join(missing)))
+    sheet = segment.get("storyboard_path")
+    if not sheet or not os.path.isfile(sheet):
+        raise ValueError("STORYBOARD_NATIVE_SOURCE_MISSING: %s" % sheet)
+    sheet_url = segment.get("storyboard_url")
+    if not sheet_url:
+        raise ValueError("STORYBOARD_NATIVE_URL_MISSING: 镜头 %s 缺少 BasicRouter 图片 retrieve URL" %
+                         (segment.get("id") or "unknown"))
+    tags, tagged = _storyboard_tagged_references(segment)
+    input_tags, omitted = _storyboard_budgeted_tags(segment)
+    urls = [sheet_url] + [tagged[tag]["url"] for tag in input_tags]
+    urls = list(dict.fromkeys(urls))
+    if len(urls) > 4:
+        raise ValueError("REFERENCE_COUNT_UNSUPPORTED: 镜头 %s 的原生故事板加 ref_tags 共 %d 张，超过网关上限 4。"
+                         % (segment.get("id") or "unknown", len(urls)))
+    prepared = dict(segment, storyboard_ref_mode="native_storyboard",
+                    storyboard_panel=None, storyboard_panel_path=None,
+                    ref_tags=list(tags), image_input_ref_tags=list(input_tags),
+                    omitted_ref_tags=list(omitted))
+    return prepared, urls
+
+
+def _prepare_storyboard_submission_for_model(api_key, segment, model, *, formal=False):
+    enabled = bool(segment.get("storyboard_ref") or segment.get("storyboard_ref_mode") or
+                   segment.get("use_storyboard_reference"))
+    if not enabled:
+        return dict(segment), list(segment.get("urls") or []), None
+    if _uses_native_storyboard_prompt(segment, model):
+        prepared, urls = _prepare_native_storyboard_submission(segment)
+        return prepared, urls, None
+    prepared, urls = _prepare_storyboard_panel_submission(api_key, segment, formal=formal)
+    return prepared, urls, prepared.get("storyboard_panel")
+
+
 def _require_confirmed_prompt_review(path, stage, segments):
     with open(path, encoding="utf-8") as handle:
         review = json.load(handle)
@@ -643,12 +911,32 @@ def _require_confirmed_prompt_review(path, stage, segments):
         raise ValueError(
             "PROMPT_REVIEW_REQUIRED: %s 阶段的中文提示词必须先由用户确认；缺少=%s" %
             (stage, ",".join(sorted(expected - actual))))
-    prompts = {str(item.get("shot_id")): item.get("prompt_zh")
+    prompts = {str(item.get("shot_id")): item
                for item in review.get("prompts") or []}
     for segment in segments:
-        if not prompts.get(str(segment.get("id"))):
+        item = prompts.get(str(segment.get("id"))) or {}
+        base_prompt = item.get("prompt_zh")
+        submission_prompt = item.get("submission_prompt_zh")
+        if not base_prompt and not submission_prompt:
             raise ValueError("PROMPT_REVIEW_REQUIRED: 缺少镜头 %s 的确认视频提示词" % segment.get("id"))
-        segment["approved_prompt_zh"] = prompts[str(segment.get("id"))]
+        if base_prompt:
+            segment["approved_prompt_zh"] = base_prompt
+        model_prompts = {}
+        raw_model_prompts = item.get("model_submission_prompts") or {}
+        if isinstance(raw_model_prompts, dict):
+            model_prompts.update({str(k): v for k, v in raw_model_prompts.items() if v})
+        for fallback in item.get("fallback_submission_prompts") or []:
+            if isinstance(fallback, dict) and fallback.get("model") and fallback.get("submission_prompt_zh"):
+                model_prompts[str(fallback["model"])] = fallback["submission_prompt_zh"]
+        if submission_prompt:
+            segment["approved_submission_prompt_zh"] = submission_prompt
+            if item.get("model"):
+                segment["approved_prompt_model"] = item.get("model")
+                model_prompts.setdefault(str(item.get("model")), submission_prompt)
+        if model_prompts:
+            segment["approved_submission_prompts_by_model"] = model_prompts
+        if item.get("director_brief"):
+            segment["director_brief"] = item["director_brief"]
 
 
 def _fit_video_prompt_limit(text, segment, model, limit=2400):
@@ -662,23 +950,66 @@ def _fit_video_prompt_limit(text, segment, model, limit=2400):
     if len(text) <= limit:
         return text
     audio = segment.get("audio_contract") or {}
+    storyboard_enabled = bool(segment.get("storyboard_ref") or segment.get("storyboard_ref_mode") or
+                              segment.get("use_storyboard_reference"))
+    if storyboard_enabled and _uses_native_storyboard_prompt(segment, model):
+        storyboard_summary = (
+            "Storyboard mode: use the uploaded Seedance-native storyboard/contact sheet for the specified current "
+            "segment and panel index; annotation colors/arrows/marks are reading-only. Do NOT render any arrows, "
+            "marks, labels, notes, grid, storyboard border, text, subtitles, logos or watermark. NEVER render the "
+            "video as a sketch, pencil drawing, charcoal drawing, storyboard panel, animatic or grayscale previs; "
+            "final output is photorealistic live-action.")
+    elif storyboard_enabled:
+        storyboard_summary = (
+            "Storyboard mode: use the uploaded SINGLE 16:9 reference plate only; it is not a multi-panel board. "
+            "Generate only this clip action; annotation colors/arrows/marks are reading-only. Do NOT render any arrows, "
+            "marks, labels, notes, grid, storyboard border, split screens, text, subtitles, logos or watermark. "
+            "NEVER render the video as a sketch, pencil drawing, charcoal drawing, storyboard panel, animatic or grayscale previs; "
+            "final output is photorealistic live-action.")
+    else:
+        storyboard_summary = ""
+    audio_method = " ".join(item for item in (
+        "Voice method: %s." % audio.get("voice_continuity_method") if audio.get("voice_continuity_method") else "",
+        "BGM method: %s." % audio.get("bgm_continuity_method") if audio.get("bgm_continuity_method") else "",
+        "SFX method: %s." % audio.get("sfx_continuity_method") if audio.get("sfx_continuity_method") else "",
+        "Media reference method: %s." % audio.get("media_reference_method") if audio.get("media_reference_method") else "",
+    ) if item)
+    director_brief = segment.get("director_brief") or {}
+    director_summary = ""
+    if isinstance(director_brief, dict) and director_brief:
+        director_summary = "; ".join(item for item in (
+            "narrative=%s" % director_brief.get("narrative_function") if director_brief.get("narrative_function") else "",
+            "beats=%s" % " / ".join(map(str, director_brief.get("timeline_beats") or [])) if director_brief.get("timeline_beats") else "",
+            "start=%s" % director_brief.get("start_state") if director_brief.get("start_state") else "",
+            "end=%s" % director_brief.get("end_state") if director_brief.get("end_state") else "",
+            "camera=%s" % director_brief.get("camera_motion") if director_brief.get("camera_motion") else "",
+            "dialogue=%s" % director_brief.get("dialogue_delivery") if director_brief.get("dialogue_delivery") else "",
+            "edit=%s" % director_brief.get("edit_continuity") if director_brief.get("edit_continuity") else "",
+            "refs=%s" % director_brief.get("reference_priority") if director_brief.get("reference_priority") else "",
+        ) if item)
     fields = [
-        "Kling commercial video. Follow the confirmed storyboard shot order; do not add text, subtitles, logos or extra characters.",
+        storyboard_summary or "Commercial video. Do not add text, subtitles, logos or extra characters.",
         "Dialogue: %s" % (audio.get("dialogue") or segment.get("dialogue") or ""),
+        "Director text: %s" % (segment.get("text") or ""),
+        "Director brief: %s" % director_summary,
         "Visual: %s" % (segment.get("visual") or ""),
         "Action: %s" % (segment.get("character_action") or segment.get("action") or ""),
         "Camera: %s" % (segment.get("camera_movement") or segment.get("camera") or ""),
         "Scene: %s" % (segment.get("scene_prompt") or ""),
-        "Continuity: %s" % (segment.get("continuity_in") or "same confirmed character, grey product, background and lighting"),
-        "Product: preserve exact confirmed geometry, neutral grey color, magnetic face and ports.",
+        "Continuity: %s" % (segment.get("continuity_in") or "same confirmed product, character when present, background and lighting"),
+        "Audio continuity: %s" % ((audio.get("voice_continuity") or "") + " " +
+                                  (audio.get("bgm_continuity") or "") + " " +
+                                  (audio.get("sfx_continuity") or "") + " " +
+                                  audio_method),
+        "Product: preserve the exact confirmed product geometry, proportions, macaron color, grille, controls, magnetic structure, ports and native markings from the uploaded references; do not recolor, redesign or replace the product.",
     ]
     compact = "\n".join(item for item in fields if item.split(": ", 1)[-1].strip())
     if len(compact) <= limit:
         return compact
     # Preserve the contract header and drop optional clauses at whole-line
     # boundaries. Never split CJK dialogue or omit no-text/storyboard rules.
-    required = fields[:2] + [fields[6], fields[7]]
-    optional = fields[2:6]
+    required = fields[:4] + [fields[8], fields[9]]
+    optional = fields[4:8]
     chosen = list(required)
     for item in optional:
         candidate = "\n".join(chosen + [item])
@@ -717,7 +1048,9 @@ def _persist_submission_intent(manifest, manifest_path, ledger_path, segment,
               "handoff_fingerprint": handoff_fingerprint,
               "attempt": attempt, "model": model,
               "dependency_fingerprint": dependency_fingerprint,
-              "request_id": request_id, "status": "submitting"}
+               "request_id": request_id, "status": "submitting"}
+    if segment.get("storyboard_panel"):
+        fields["storyboard_panel"] = segment["storyboard_panel"]
     if ledger_path:
         generation_ledger.append_event(
             ledger_path, "task_submitting", **fields)
@@ -726,6 +1059,28 @@ def _persist_submission_intent(manifest, manifest_path, ledger_path, segment,
         if manifest_path:
             _rm.save_manifest(manifest, manifest_path)
     return request_id
+
+
+def _mark_submission_failed(manifest, manifest_path, segment, handoff_fingerprint,
+                            attempt, model, request_id, error):
+    if manifest is None or not segment or not handoff_fingerprint or not attempt:
+        return
+    fields = {"stage": "video", "unit_id": segment.get("id"),
+              "handoff_fingerprint": handoff_fingerprint, "attempt": attempt,
+              "model": model, "request_id": request_id, "status": "failed",
+              "error": str(error), "failure_phase": "submit"}
+    if segment.get("storyboard_panel"):
+        fields["storyboard_panel"] = segment["storyboard_panel"]
+    _rm.upsert_task(manifest, fields)
+    manifest.setdefault("video_attempts", {})[str(segment.get("id"))] = {
+        "attempt": int(attempt) + 1,
+        "actor": "system",
+        "reason": "retry_after_submit_failure",
+        "previous_error": str(error),
+        "authorized_at": _dt.datetime.now().isoformat(timespec="seconds"),
+    }
+    if manifest_path:
+        _rm.save_manifest(manifest, manifest_path)
 
 
 def _current_attempt(manifest, segment_id):
@@ -759,7 +1114,7 @@ def _refresh_completed_video_url(api_key, task_id, cached_url=None):
 def _download_completed_video(api_key, task_id, url, out_path):
     """Download once, refreshing only the URL of the same task on auth expiry."""
     try:
-        return br_client.download(url, out_path)
+        return br_client.download(url, out_path, allow_nonpublic_peer=True)
     except br_client.BRError as exc:
         message = str(exc).lower()
         if (getattr(exc, "http_status", None) not in (401, 403, 404) and
@@ -768,7 +1123,7 @@ def _download_completed_video(api_key, task_id, url, out_path):
         refreshed = _refresh_completed_video_url(api_key, task_id, url)
         if not refreshed or refreshed == url:
             raise
-        return br_client.download(refreshed, out_path)
+        return br_client.download(refreshed, out_path, allow_nonpublic_peer=True)
 
 
 def _fallback_metadata(initial_model, model, reason=None):
@@ -827,14 +1182,16 @@ def render(text, video_type=1, urls=None, model=DEFAULT_MODEL,
             raise ValueError("VIDEO_HANDOFF_MISMATCH: 单段必须提供 manifest 中已记录的 segment/handoff")
         if out_path is None:
             raise ValueError("OUT_PATH_REQUIRED: 正式视频入口必须提供 out_path")
-        bad = [ref for ref in (urls or []) if not _reference_is_trusted(client, ref, manifest)]
+        trusted_inputs = ((storyboard_segment or {}).get("urls") if storyboard_segment else urls) or []
+        bad = [ref for ref in trusted_inputs if not _reference_is_trusted(client, ref, manifest)]
         if bad:
             raise ValueError("UNTRUSTED_VIDEO_REFERENCE: %s" % ", ".join(map(str, bad)))
 
     # local file paths -> hosted URLs (video endpoint rejects large data-URL bodies)
     if urls:
         log("[refs] normalizing %d image ref(s)…" % len(urls))
-        ref_urls = [br_client.to_image_ref(u, api_key=api_key, prefer_hosted=True) for u in urls]
+        ref_urls = [_video_image_ref(u, api_key=api_key, allow_local_draft=draft)
+                    for u in urls]
     else:
         ref_urls = urls
     _validate_model_reference_capacity(model, len(ref_urls or []), formal=not draft)
@@ -1014,11 +1371,12 @@ def render_chained(segments, model=None, verbose=True,
         raise ValueError(
             "VIDEO_EXTENSION_BLOCKED: 只有 oral-broadcast 口播场景允许使用模型视频延长；"
             "其他场景必须独立分段生成后拼接：%s" % ", ".join(map(str, non_oral_extensions)))
-    if prompt_review and not draft:
-        _require_confirmed_prompt_review(prompt_review, "video", segments)
     if not draft:
         if not client or manifest is None or not manifest_path or not results_out:
             raise ValueError("FORMAL_VIDEO_REQUIRES_CLIENT_MANIFEST: chain 正式入口需要 client、manifest、results_out")
+        if not prompt_review:
+            raise ValueError("PROMPT_REVIEW_REQUIRED: 正式生视频前必须提供已确认的中文提示词审核文件")
+        _require_confirmed_prompt_review(prompt_review, "video", segments)
         if ledger_path and os.path.isfile(ledger_path):
             _rm.reconcile_tasks_from_ledger(manifest, ledger_path)
             _rm.save_manifest(manifest, manifest_path)
@@ -1028,6 +1386,7 @@ def render_chained(segments, model=None, verbose=True,
         _validate_references(segments, client, manifest)
         if any(not seg.get("out_path") for seg in segments):
             raise ValueError("OUT_PATH_REQUIRED: 正式 chain 每段必须提供 out_path")
+    key_setup.ensure_session_id()
     api_key = key_setup.load_key()
     if not api_key:
         raise br_client.BRError("No API key. Run key onboarding first (paste your sk- key).")
@@ -1052,16 +1411,85 @@ def render_chained(segments, model=None, verbose=True,
     prev_video_url = None
     prev_result = None
 
+    def _flush():
+        # Persist after every segment, not just at the end. A chain is
+        # serial and can take many minutes; if the process is interrupted
+        # (背景任务被回收/断网/超时), whatever finished so far must survive
+        # on disk so a retry can resume instead of re-paying for segments
+        # that already succeeded.
+        if results_out:
+            _atomic_json_write(results_out, results)
+
+    def _prepare_chain_storyboard_refs(segment, target_model, tail_url=None):
+        prepared, prepared_urls, panel = _prepare_storyboard_submission_for_model(
+            api_key, segment, target_model, formal=not draft)
+        urls = list(prepared_urls or [])
+        if tail_url:
+            dropped_for_tail = []
+            if len(urls) + 1 > 4:
+                dropped_for_tail = urls[3:]
+                urls = urls[:3]
+            urls = [tail_url] + urls
+            prepared["_chain_tail_frame"] = True
+            if dropped_for_tail:
+                prepared["chain_omitted_reference_urls"] = dropped_for_tail
+        ref_urls = [_video_image_ref(u, api_key=api_key, allow_local_draft=draft)
+                    for u in urls] if urls else None
+        vtype = 5 if ref_urls and len(ref_urls) > 1 else (2 if ref_urls else prepared.get("video_type", 1))
+        return prepared, ref_urls, panel, vtype
+
+    # ---- draft 模式断点续跑：读取上一次未完成的 results_out ----
+    # 正式(非draft)模式已有 manifest task 层的 resumed/completed 逻辑
+    # （_rm.find_resumable_task / _completed_task），这里只补 draft 模式
+    # 的缺口：draft 时 manifest 为 None，之前完全没有续跑判断。
+    resume_by_segment = {}
+    if draft and results_out and os.path.isfile(results_out):
+        try:
+            with open(results_out, encoding="utf-8") as handle:
+                prior_results = json.load(handle)
+            if isinstance(prior_results, list):
+                for item in prior_results:
+                    if isinstance(item, dict) and item.get("segment_id"):
+                        resume_by_segment[item["segment_id"]] = item
+        except (OSError, ValueError, json.JSONDecodeError):
+            resume_by_segment = {}
+
     for i, seg in enumerate(segments):
         # Keep all submission state iteration-local. A failed segment must not
         # inherit task or model details from the preceding segment's audit row.
         seg_model = initial_model = tid = ref_urls = None
         seg_vtype = seg.get("video_type", 1)
         submission_attempt = None
+        request_id = None
+
+        prior = resume_by_segment.get(seg.get("id"))
+        if (prior and prior.get("ok") and prior.get("localPath")
+                and os.path.isfile(prior.get("localPath"))
+                and prior.get("video_handoff_fingerprint")
+                == (seg.get("video_handoff_fingerprint")
+                    or artifact_contract.build_video_handoff(seg)["fingerprint"])):
+            log("[chain %d/%d] 续跑：复用已完成结果 %s（%s），跳过重新生成"
+                % (i + 1, len(segments), seg.get("id"), prior.get("localPath")))
+            results.append(prior)
+            prev_result = prior
+            prev_video_url = prior.get("videoUrl")
+            if i < len(segments) - 1:
+                tail = _extract_last_frame(prior["localPath"], log)
+                prev_tail_path = tail
+                prev_tail_url = (_video_image_ref(tail, api_key=api_key,
+                                                  allow_local_draft=draft)
+                                 if tail else None)
+            else:
+                prev_tail_path = None
+                prev_tail_url = None
+            _flush()
+            continue
+
         try:
             attempt = _current_attempt(manifest, seg.get("id"))
             handoff_fp = seg.get("video_handoff_fingerprint") or artifact_contract.build_video_handoff(seg)["fingerprint"]
             seg = _expand_product_refs(seg, client)
+            submission_source_seg = dict(seg)
             resumed = None
             completed = None
             intent = None
@@ -1070,6 +1498,8 @@ def render_chained(segments, model=None, verbose=True,
                 intent = _rm.find_submission_intent(
                     manifest, "video", seg.get("id"), handoff_fp)
                 completed = _completed_task(manifest, seg.get("id"), handoff_fp)
+            storyboard_ref = bool(seg.get("storyboard_ref") or seg.get("storyboard_ref_mode") or
+                                  seg.get("use_storyboard_reference"))
             # 第 1 段用自身设置；后续段的分支取决于 urls 来源：
             #   - 段自己显式给的 urls（非 locked_refs 注入）→ 尊重段设置，不串尾帧
             #   - locked_refs 注入的 urls（seg["_locked_urls"]=True）→ 仍然串尾帧，
@@ -1077,16 +1507,25 @@ def render_chained(segments, model=None, verbose=True,
             #     （旧 bug：只要 seg.get("urls") 非空就整段跳过 tail-frame 分支，导致
             #     --chain + --locked-refs 一起用时尾帧串联被静默完全禁用）
             #   - 都没有 → 用上一段尾帧串联
-            has_own_explicit_urls = bool(seg.get("urls")) and not seg.get("_locked_urls")
-            if i == 0 or has_own_explicit_urls:
+            has_own_explicit_urls = (bool(seg.get("urls")) and not seg.get("_locked_urls") and
+                                     not storyboard_ref)
+            storyboard_tail_url = prev_tail_url if (storyboard_ref and i > 0 and prev_tail_url) else None
+            if storyboard_ref:
+                vtype = seg.get("video_type", 5)
+                ref_urls = None
+                if storyboard_tail_url:
+                    seg["_chain_tail_frame"] = True
+            elif i == 0 or has_own_explicit_urls:
                 vtype = seg.get("video_type", 1)
                 urls = seg.get("urls")
-                ref_urls = ([br_client.to_image_ref(u, api_key=api_key, prefer_hosted=True)
+                ref_urls = ([_video_image_ref(u, api_key=api_key,
+                                              allow_local_draft=draft)
                              for u in urls] if urls else None)
             elif seg.get("_locked_urls"):
                 # locked_refs 注入段：尾帧 + 锁定参考图合并（尾帧优先，串联权重更高）
                 locked_urls = seg.get("urls") or []
-                ref_urls = ([br_client.to_image_ref(u, api_key=api_key, prefer_hosted=True)
+                ref_urls = ([_video_image_ref(u, api_key=api_key,
+                                              allow_local_draft=draft)
                              for u in locked_urls] if locked_urls else [])
                 if prev_tail_url:
                     ref_urls = [prev_tail_url] + [u for u in ref_urls if u != prev_tail_url]
@@ -1120,11 +1559,16 @@ def render_chained(segments, model=None, verbose=True,
                 seg.get("model") or default_model,
                 allow_fallback=allow_model_fallback,
                 reference_count=len(ref_urls or []), **pick_args)
+            storyboard_panel = None
+            if storyboard_ref and not (completed or resumed):
+                seg, ref_urls, storyboard_panel, vtype = _prepare_chain_storyboard_refs(
+                    seg, seg_model, tail_url=storyboard_tail_url)
             _validate_model_reference_capacity(seg_model, len(ref_urls or []), formal=not draft)
 
-            storyboard_ref = bool(seg.get("storyboard_ref") or seg.get("storyboard_ref_mode") or seg.get("use_storyboard_reference"))
             seg["product_identity_lock"] = bool(seg.get("product_identity_lock") or seg.get("product_sku"))
             seg["character_identity_lock"] = bool(seg.get("character_identity_lock") or seg.get("actor"))
+            submission_source_seg["product_identity_lock"] = seg["product_identity_lock"]
+            submission_source_seg["character_identity_lock"] = seg["character_identity_lock"]
             seg_negative = seg.get("negative_prompt", negative_prompt)
             if storyboard_ref:
                 seg_negative = _storyboard_negative(seg_negative)
@@ -1178,7 +1622,9 @@ def render_chained(segments, model=None, verbose=True,
                                 "handoff_fingerprint": handoff_fp,
                                 "request_id": request_id, "attempt": attempt,
                                 "dependency_fingerprint": (dependency or {}).get("fingerprint"),
-                                "generation_dependency": (dependency or {}).get("payload")}
+                                "generation_dependency": (dependency or {}).get("payload"),
+                                "storyboard_panel": storyboard_panel,
+                                "source_segment": submission_source_seg}
                         _persist_task(manifest, manifest_path, ledger_path, task, "submitted",
                                       request_id=request_id)
                     url = br_client.wait_video(api_key, tid, interval=8, max_wait=max_wait, on_tick=tick)
@@ -1193,18 +1639,23 @@ def render_chained(segments, model=None, verbose=True,
                               or seg.get("dialogue")), formal=not draft,
                     allow_fallback=False)
                 log("[chain %d privacy-fallback] Seedance 真人参考图被拒，按原剧本改用 Kling 重试一次" % (i + 1))
+                if storyboard_ref and not completed:
+                    seg, ref_urls, storyboard_panel, vtype = _prepare_chain_storyboard_refs(
+                        submission_source_seg, seg_model, tail_url=storyboard_tail_url)
                 request_id = _persist_submission_intent(
-                    manifest, manifest_path, ledger_path, seg,
+                    manifest, manifest_path, ledger_path, submission_source_seg,
                     seg_model, vtype, handoff_fp, attempt=attempt + 1,
                     dependency_fingerprint=(dependency or {}).get("fingerprint"))
-                tid, _ = _submit_video(api_key, seg, seg_model, vtype, ref_urls, seg_negative,
-                                       seed=seg.get("seed"), storyboard_ref=storyboard_ref,
+                tid, _ = _submit_video(api_key, submission_source_seg, seg_model, vtype, ref_urls, seg_negative,
+                                       seed=submission_source_seg.get("seed"), storyboard_ref=storyboard_ref,
                                        extend_url=extend_url, request_id=request_id)
-                task = {"segment": seg, "task_id": tid, "model": seg_model,
+                task = {"segment": submission_source_seg, "task_id": tid, "model": seg_model,
                         "handoff_fingerprint": handoff_fp, "request_id": request_id,
                         "attempt": attempt + 1,
                         "dependency_fingerprint": (dependency or {}).get("fingerprint"),
-                        "generation_dependency": (dependency or {}).get("payload")}
+                        "generation_dependency": (dependency or {}).get("payload"),
+                        "storyboard_panel": storyboard_panel,
+                        "source_segment": submission_source_seg}
                 _persist_task(manifest, manifest_path, ledger_path, task, "submitted",
                               fallback_reason="reference_real_person_privacy",
                               request_id=request_id, attempt=attempt + 1)
@@ -1215,7 +1666,8 @@ def render_chained(segments, model=None, verbose=True,
                     "handoff_fingerprint": handoff_fp,
                     "attempt": task.get("attempt", attempt),
                     "dependency_fingerprint": (dependency or {}).get("fingerprint"),
-                    "generation_dependency": (dependency or {}).get("payload")}
+                    "generation_dependency": (dependency or {}).get("payload"),
+                    "storyboard_panel": storyboard_panel}
             _persist_task(manifest, manifest_path, ledger_path, task, "succeeded", video_url=url)
 
             local = None
@@ -1231,6 +1683,7 @@ def render_chained(segments, model=None, verbose=True,
                                     "taskId": tid, "segment_id": seg.get("id"),
                                     "resume_available": True})
                     prev_tail_url = None
+                    _flush()
                     continue
             qc_task = dict(task, video_url=url)
             qc = _media_qc_guard(local, seg, draft=draft, manifest=manifest,
@@ -1243,6 +1696,7 @@ def render_chained(segments, model=None, verbose=True,
                                 "actual_duration": (qc.get("media") or {}).get("actual_duration"),
                                 "media_qc": qc, "media_qc_report": qc.get("report_path")})
                 prev_tail_url = None
+                _flush()
                 continue
             ocr = _ocr_guard(local, log) if local else None
             result = {"ok": True, "videoUrl": url, "localPath": local,
@@ -1274,6 +1728,7 @@ def render_chained(segments, model=None, verbose=True,
             result["generation_dependency_fingerprint"] = (dependency or {}).get("fingerprint")
             results.append(result)
             prev_result = result
+            _flush()
 
             # 抽本段尾帧，上传，供下一段串联
             if i < len(segments) - 1:
@@ -1288,12 +1743,14 @@ def render_chained(segments, model=None, verbose=True,
                 if not local and src_for_tail and os.path.isfile(src_for_tail):
                     os.remove(src_for_tail)
                 prev_tail_path = tail
-                prev_tail_url = (br_client.to_image_ref(tail, api_key=api_key, prefer_hosted=True)
+                prev_tail_url = (_video_image_ref(tail, api_key=api_key,
+                                                  allow_local_draft=draft)
                                  if tail else None)
         except (br_client.BRError, ValueError) as e:
             log("[chain %d] FAILED: %s" % (i + 1, e))
             results.append({"ok": False, "videoUrl": None, "localPath": None,
                             "absPath": None, "error": str(e),
+                            "segment_id": seg.get("id"),
                             "chain_aborted": True,
                             "chain_abort_reason": "predecessor_failed"})
             # A chained sequence is one semantic take. Never spend on later
@@ -1303,6 +1760,7 @@ def render_chained(segments, model=None, verbose=True,
                                 "absPath": None, "segment_id": remaining.get("id"),
                                 "error": "CHAIN_ABORTED: predecessor segment failed",
                                 "chain_aborted": True})
+            _flush()
             break
             prev_tail_path = None
             prev_video_url = None
@@ -1311,8 +1769,7 @@ def render_chained(segments, model=None, verbose=True,
         if result and result.get("ocr_warning") and not allow_ocr_warning:
             result["delivery_blocked"] = True
             result["needs_confirmation"] = True
-    if results_out:
-        _atomic_json_write(results_out, results)
+    _flush()
     return results
 
 
@@ -1432,7 +1889,7 @@ def render_batch(segments, model=None, verbose=True, seed=None,
                  negative_prompt=DEFAULT_NEGATIVE, client=None, locked_refs=None,
                  allow_model_fallback=True, manifest=None, manifest_path=None,
                   ledger_path=None, results_out=None, allow_ocr_warning=False,
-                   draft=False, max_wait=3600, prompt_review=None):
+                   draft=False, max_wait=3600, prompt_review=None, budget_cap=None):
     """Render multiple segments as a PARALLEL async workflow.
 
     seed：整批共用同一 seed，透传给模型。⚠️ 实测 kling-v3-omni-video 不真正锁定
@@ -1459,23 +1916,35 @@ def render_batch(segments, model=None, verbose=True, seed=None,
     Returns list of {ok, videoUrl, localPath, error} aligned to input order.
     """
     key_setup.ensure_session_id()
-    if prompt_review and not draft:
-        _require_confirmed_prompt_review(prompt_review, "video", segments)
     if locked_refs:
         segments = _apply_locked_refs(segments, locked_refs)
     if not draft:
         if not client or manifest is None or not manifest_path or not results_out:
             raise ValueError("FORMAL_VIDEO_REQUIRES_CLIENT_MANIFEST: batch 正式入口需要 client、manifest、results_out")
+        if not prompt_review:
+            raise ValueError("PROMPT_REVIEW_REQUIRED: 正式生视频前必须提供已确认的中文提示词审核文件")
+        _require_confirmed_prompt_review(prompt_review, "video", segments)
         if ledger_path and os.path.isfile(ledger_path):
             _rm.reconcile_tasks_from_ledger(manifest, ledger_path)
             _rm.save_manifest(manifest, manifest_path)
         _rm.identity_gate(manifest, client=client)
         _rm.generation_gate(manifest, "video", client=client)
         _manifest_handoff_matches(manifest, segments)
+        # 结构化日志上下文：run_id 贯穿本批次所有事件（trace_id）
+        try:
+            obs_log.configure(client=client, run_id=manifest.get("run_id"),
+                              run_dir=_rm.run_output_root(manifest))
+        except Exception:
+            pass  # 日志上下文失败不阻断业务
         if not all(seg.get("out_path") for seg in segments):
             raise ValueError("OUT_PATH_REQUIRED: 正式 batch 每段必须提供 out_path")
         _validate_references(segments, client, manifest)
         _validate_reference_handoff(segments)
+        import storyboard_enhancements
+        stale = storyboard_enhancements.stale_artifacts(segments)
+        if not stale["ok"]:
+            raise ValueError("STALE_ARTIFACTS_BLOCK_DELIVERY: %s" % json.dumps(
+                stale["stale"], ensure_ascii=False))
     api_key = key_setup.load_key()
     if not api_key:
         raise br_client.BRError("No API key. Run key onboarding first (paste your sk- key).")
@@ -1488,6 +1957,31 @@ def render_batch(segments, model=None, verbose=True, seed=None,
     default_model = _pick_video_model(model or DEFAULT_MODEL)
     if model and default_model != model:
         log("[batch] 默认模型 %s 不可用，降级到 %s" % (model, default_model))
+
+    # ---- 事前成本预估 + 集中化闸门（fail-closed，draft/正式一致生效）----
+    estimated_cost = 0.0
+    for seg in segments:
+        seg_model_name = seg.get("model") or default_model
+        estimated_cost += cost_ledger.cost_estimate_for_task(
+            seg_model_name, seg.get("duration") or seg.get("duration_sec"))["cost_estimate"]
+    estimated_cost = round(estimated_cost, 4)
+    log("[batch] 本次渲染预计成本 $%.4f（%d 段，按历史价目表估算）"
+        % (estimated_cost, len(segments)))
+    obs_log.log_event("batch_cost_estimate", estimated_cost=estimated_cost,
+                      segments=len(segments), budget_cap=budget_cap)
+    policy_context = {"estimated_cost": estimated_cost, "budget_cap": budget_cap}
+    required_refs = sorted({t for seg in segments
+                            for t in (seg.get("required_reference_types") or [])})
+    if required_refs:
+        policy_context["required_reference_types"] = required_refs
+        policy_context["actual_reference_types"] = sorted(
+            {ref.get("type") for seg in segments for ref in (seg.get("references") or [])
+             if isinstance(ref, dict) and ref.get("type")})
+        policy_context["dropped_references"] = [
+            item for seg in segments for item in (seg.get("dropped_references") or [])]
+    policy_check.enforce("submit_video", policy_context)
+    obs_log.log_event("batch_start", segments=len(segments),
+                      default_model=default_model, draft=draft)
 
     # 共享锚定素材锁（跨段固定人物/产品/场景，只变台词/剧本/运镜）
     if locked_refs:
@@ -1504,7 +1998,6 @@ def render_batch(segments, model=None, verbose=True, seed=None,
         if seg.get("storyboard_ref") and sb_path and not os.path.isfile(sb_path):
             stale.append("%s (%s)" % (seg.get("id", "?"), sb_path))
         sb_dir = seg.get("storyboard_dir")
-        expected = seg.get("storyboard_plan_fingerprint")
         actual = None
         result_file = os.path.join(sb_dir, "storyboard_result.json") if sb_dir else None
         if result_file and os.path.isfile(result_file):
@@ -1513,11 +2006,31 @@ def render_batch(segments, model=None, verbose=True, seed=None,
                     actual = json.load(handle).get("plan_fingerprint")
             except (OSError, ValueError, TypeError):
                 actual = None
-        recorded_result = seg.get("storyboard_result_fingerprint")
-        if expected and recorded_result and expected != recorded_result:
-            stale.append("%s (分段与故事板结果指纹不一致)" % seg.get("id", "?"))
-        if expected and actual and expected != actual:
-            stale.append("%s (故事板 revision 已不是分段编译时的版本)" % seg.get("id", "?"))
+        if actual:
+            try:
+                with open(result_file, encoding="utf-8") as handle:
+                    result = json.load(handle)
+                matching = next((item for item in result.get("shots") or []
+                                 if str((item.get("shot") or {}).get("id")) == str(seg.get("id"))), None)
+                expected_shot = seg.get("storyboard_shot_fingerprint")
+                if expected_shot:
+                    stored = (matching or {}).get("shot_fingerprint")
+                    try:
+                        import storyboard as _storyboard
+                        current = _storyboard.shot_fingerprint((matching or {}).get("shot") or {})
+                    except Exception:
+                        current = None
+                    if not matching or expected_shot not in (stored, current):
+                        stale.append("%s (故事板镜头画面已修订)" % seg.get("id", "?"))
+                else:
+                    expected = seg.get("storyboard_plan_fingerprint")
+                    recorded_result = seg.get("storyboard_result_fingerprint")
+                    if expected and recorded_result and expected != recorded_result:
+                        stale.append("%s (分段与故事板结果指纹不一致)" % seg.get("id", "?"))
+                    if expected and expected != actual:
+                        stale.append("%s (故事板 revision 已不是分段编译时的版本)" % seg.get("id", "?"))
+            except (OSError, ValueError, TypeError):
+                stale.append("%s (无法读取故事板结果)" % seg.get("id", "?"))
     if stale:
         raise ValueError(
             "STALE_STORYBOARD: 分段配置引用的故事板文件已不存在或已被修订：%s。"
@@ -1533,6 +2046,11 @@ def render_batch(segments, model=None, verbose=True, seed=None,
         seg_model = initial_model = tid = ref_urls = None
         seg_vtype = seg.get("video_type", 1)
         submission_attempt = None
+        request_id = None
+        # Initialize before product expansion so fail-closed validation errors
+        # still return a structured task record instead of masking the root
+        # error with UnboundLocalError.
+        submission_source_seg = dict(seg)
         try:
             handoff_fp = seg.get("video_handoff_fingerprint") or artifact_contract.build_video_handoff(seg)["fingerprint"]
             resumed = None
@@ -1543,6 +2061,7 @@ def render_batch(segments, model=None, verbose=True, seed=None,
                 intent = _rm.find_submission_intent(
                     manifest, "video", seg.get("id"), handoff_fp)
                 completed = _completed_task(manifest, seg.get("id"), handoff_fp)
+            storyboard_ref = bool(seg.get("storyboard_ref") or seg.get("storyboard_ref_mode") or seg.get("use_storyboard_reference"))
             # ── product_sku 自动展开：若 seg 含 product_sku，通过 product_library.resolve()
             # 把多方位图展开为 urls，实现与数字人对等的多图锚定（videoType=5）
             seg_urls = seg.get("urls") or []
@@ -1580,13 +2099,13 @@ def render_batch(segments, model=None, verbose=True, seed=None,
                 raise ValueError("PRODUCT_SKU_NO_REFERENCES: %s" % product_sku)
 
             urls = seg_urls or None
+            submission_source_seg = dict(seg)
             if not draft and not product_sku:
                 bad = [ref for ref in (urls or [])
-                       if not _reference_is_trusted(client, ref, manifest)]
+                       if not _trusted_remote_segment_reference(seg, ref)
+                       and not _reference_is_trusted(client, ref, manifest)]
                 if bad:
                     raise ValueError("UNTRUSTED_VIDEO_REFERENCE: %s" % ", ".join(map(str, bad)))
-            ref_urls = ([br_client.to_image_ref(u, api_key=api_key, prefer_hosted=True)
-                         for u in urls] if urls else None)
             seg_vtype = seg.get("video_type", 1)
             pick_args = {"video_type": seg_vtype}
             if not draft:
@@ -1594,8 +2113,17 @@ def render_batch(segments, model=None, verbose=True, seed=None,
                                            or seg.get("dialogue")),
                                  formal=True)
             seg_model = _pick_video_model(seg.get("model") or default_model, **pick_args)
+            if not draft:
+                _assert_confirmed_submission_for_model(seg, seg_model)
+            expanded_panel = None
+            if storyboard_ref and not (completed or resumed):
+                seg, urls, expanded_panel = _prepare_storyboard_submission_for_model(
+                    api_key, submission_source_seg, seg_model, formal=not draft)
+                seg_vtype = seg.get("video_type", seg_vtype)
+            ref_urls = ([_video_image_ref(u, api_key=api_key,
+                                          allow_local_draft=draft)
+                          for u in urls] if urls else None)
             seg_seed = seg.get("seed", seed)  # 段级 seed 覆盖批级；批级 seed 保证跨段一致
-            storyboard_ref = bool(seg.get("storyboard_ref") or seg.get("storyboard_ref_mode") or seg.get("use_storyboard_reference"))
             seg_negative = seg.get("negative_prompt", negative_prompt)
             if storyboard_ref:
                 seg_negative = _storyboard_negative(seg_negative)
@@ -1636,6 +2164,14 @@ def render_batch(segments, model=None, verbose=True, seed=None,
                     fallback_reason = "reference_real_person_privacy"
                     submission_attempt += 1
                     log("[submit %d privacy-fallback] Seedance 真人参考图被拒，改用 Kling 重试一次" % (i + 1))
+                    if not draft:
+                        _assert_confirmed_submission_for_model(seg, seg_model)
+                    if storyboard_ref:
+                        seg, urls, expanded_panel = _prepare_storyboard_submission_for_model(
+                            api_key, submission_source_seg, seg_model, formal=not draft)
+                        ref_urls = [_video_image_ref(u, api_key=api_key,
+                                                     allow_local_draft=draft)
+                                    for u in (urls or [])]
                     request_id = _persist_submission_intent(
                         manifest, manifest_path, ledger_path, seg,
                         seg_model, seg_vtype, handoff_fp, attempt=submission_attempt)
@@ -1660,6 +2196,14 @@ def render_batch(segments, model=None, verbose=True, seed=None,
                     submission_attempt += 1
                     log("[submit %d model-fallback] %s 不可用，改用 %s 重试一次" %
                         (i + 1, failed_model, seg_model))
+                    if not draft:
+                        _assert_confirmed_submission_for_model(seg, seg_model)
+                    if storyboard_ref:
+                        seg, urls, expanded_panel = _prepare_storyboard_submission_for_model(
+                            api_key, submission_source_seg, seg_model, formal=not draft)
+                        ref_urls = [_video_image_ref(u, api_key=api_key,
+                                                     allow_local_draft=draft)
+                                    for u in (urls or [])]
                     request_id = _persist_submission_intent(
                         manifest, manifest_path, ledger_path, seg,
                         seg_model, seg_vtype, handoff_fp, attempt=submission_attempt)
@@ -1674,18 +2218,22 @@ def render_batch(segments, model=None, verbose=True, seed=None,
                          request_id=request_id)
                 if manifest is not None:
                     _rm.upsert_task(manifest, {"stage": "video", "unit_id": seg.get("id"),
-                                                "handoff_fingerprint": handoff_fp,
+                                                 "handoff_fingerprint": handoff_fp,
                                                 "attempt": submission_attempt,
                                                 "task_id": tid, "model": seg_model,
-                                                "request_id": request_id, "status": "submitted"})
+                                                 "request_id": request_id, "status": "submitted",
+                                                 "storyboard_panel": expanded_panel,
+                                                 "source_segment": submission_source_seg})
                     if manifest_path:
                         _rm.save_manifest(manifest, manifest_path)
             log("[submit %d/%d] taskId=%s (model=%s)" % (i + 1, len(segments), tid, seg_model))
             tasks.append({"idx": i, "task_id": tid, "segment": seg, "error": None,
                           "model": seg_model, "initial_model": initial_model,
-                          "video_type": seg_vtype, "ref_urls": ref_urls,
-                          "negative_prompt": seg_negative, "seed": seg_seed,
-                          "storyboard_ref": storyboard_ref,
+                           "video_type": seg_vtype, "ref_urls": ref_urls,
+                           "negative_prompt": seg_negative, "seed": seg_seed,
+                           "storyboard_ref": storyboard_ref,
+                           "storyboard_panel": expanded_panel,
+                           "source_segment": submission_source_seg,
                             "completed_url": None,
                            "fallback_reason": fallback_reason,
                            "attempt": (completed or resumed or {}).get(
@@ -1693,10 +2241,15 @@ def render_batch(segments, model=None, verbose=True, seed=None,
                            "handoff_fingerprint": handoff_fp})
         except (br_client.BRError, ValueError) as e:
             log("[submit %d/%d] FAILED: %s" % (i + 1, len(segments), e))
+            _mark_submission_failed(
+                manifest, manifest_path, seg,
+                locals().get("handoff_fp"), submission_attempt,
+                seg_model, request_id, e)
             tasks.append({"idx": i, "task_id": None, "segment": seg, "error": str(e),
                           "model": seg_model, "initial_model": initial_model,
                           "video_type": seg_vtype, "ref_urls": ref_urls,
-                          "attempt": submission_attempt, "fallback_reason": None})
+                          "attempt": submission_attempt, "fallback_reason": None,
+                          "source_segment": submission_source_seg})
 
     # ---- phase 2: poll all live tasks together until each finishes ----
     results = [None] * len(segments)
@@ -1733,6 +2286,17 @@ def render_batch(segments, model=None, verbose=True, seed=None,
                                   attempt=old_attempt,
                                   reason="reference_real_person_privacy")
                     t["attempt"] = old_attempt + 1
+                    if t.get("storyboard_ref"):
+                        source_seg = t.get("source_segment") or seg
+                        prepared_seg, prepared_urls, panel = _prepare_storyboard_submission_for_model(
+                            api_key, source_seg, t["model"], formal=not draft)
+                        t["segment"] = prepared_seg
+                        t["source_segment"] = source_seg
+                        t["ref_urls"] = [_video_image_ref(
+                            u, api_key=api_key, allow_local_draft=draft)
+                            for u in (prepared_urls or [])]
+                        t["storyboard_panel"] = panel
+                        seg = prepared_seg
                     request_id = _persist_submission_intent(
                         manifest, manifest_path, ledger_path, seg, t["model"],
                         t["video_type"], t.get("handoff_fingerprint"),
@@ -1862,6 +2426,17 @@ def render_batch(segments, model=None, verbose=True, seed=None,
                                   attempt=old_attempt,
                                   reason="reference_real_person_privacy")
                     t["attempt"] = old_attempt + 1
+                    if t.get("storyboard_ref"):
+                        source_seg = t.get("source_segment") or seg
+                        prepared_seg, prepared_urls, panel = _prepare_storyboard_submission_for_model(
+                            api_key, source_seg, t["model"], formal=not draft)
+                        t["segment"] = prepared_seg
+                        t["source_segment"] = source_seg
+                        t["ref_urls"] = [_video_image_ref(
+                            u, api_key=api_key, allow_local_draft=draft)
+                            for u in (prepared_urls or [])]
+                        t["storyboard_panel"] = panel
+                        seg = prepared_seg
                     request_id = _persist_submission_intent(
                         manifest, manifest_path, ledger_path, seg, t["model"],
                         t["video_type"], t.get("handoff_fingerprint"),
@@ -1923,8 +2498,21 @@ def render_batch(segments, model=None, verbose=True, seed=None,
         if result and result.get("ocr_warning") and not allow_ocr_warning:
             result["delivery_blocked"] = True
             result["needs_confirmation"] = True
+            obs_log.log_event("ocr_warning", segment_id=result.get("segment_id"),
+                              ocr_texts=result.get("ocr_texts"))
+    obs_log.log_event("batch_done",
+                      succeeded=sum(1 for r in results if r and r.get("ok")),
+                      failed=sum(1 for r in results if not (r and r.get("ok"))))
     if results_out:
         _atomic_json_write(results_out, results)
+        if any(seg.get("storyboard_panel") for seg in segments):
+            try:
+                import storyboard_enhancements
+                storyboard_enhancements.write_binding_report(
+                    segments, results, os.path.join(
+                        os.path.dirname(os.path.abspath(results_out)), "video_binding_report.html"))
+            except Exception as report_error:
+                log("[binding-report] 生成审计报告失败：%s" % report_error)
     return results
 
 
@@ -2055,7 +2643,7 @@ def main(argv):
                    help="1=t2v 2=i2v(first) 3=first+last 4=ref-image 5=multi-ref")
     p.add_argument("--urls", nargs="*", default=None, help="reference image URLs")
     p.add_argument("--storyboard-ref", action="store_true",
-                   help="把 --urls/段 urls 当作最终16:9 4x3 12格故事板参考，按1→12格顺序生成连续视频")
+                   help="把确认故事板作为当前 shot 的来源；Seedance 优先原生 storyboarding，Kling fallback 才生成单格 16:9 展开图")
     p.add_argument("--seedance-native", action="store_true",
                    help="Seedance 使用时间节点+参考素材角色的原生提示词格式")
     p.add_argument("--model", default=DEFAULT_MODEL)
@@ -2103,6 +2691,8 @@ def main(argv):
                    help="continuity_state plan 输出：只使用已验收父 take 或已批准场景锚点")
     p.add_argument("--prompt-review", default=None,
                    help="已确认的中文视频提示词审核文件；正式生成必须提供")
+    p.add_argument("--budget-cap", type=float, default=None,
+                   help="本批次预算上限（美元）：事前成本预估超过即阻断（fail-closed）")
     args = p.parse_args(argv)
 
     # ---- batch mode: 默认并行；--chain 走尾帧串联(串行、跨段一致) ----
@@ -2164,7 +2754,8 @@ def main(argv):
                                          ledger_path=args.ledger, results_out=args.results_out,
                                          allow_ocr_warning=args.allow_ocr_warning,
                                            draft=args.draft, max_wait=args.max_wait,
-                                           prompt_review=args.prompt_review)
+                                           prompt_review=args.prompt_review,
+                                           budget_cap=args.budget_cap)
         except br_client.BRError as e:
             message = ux.friendly_error(e)
             print(json.dumps({"ok": False, "error": str(e), "user_message": message},
@@ -2211,6 +2802,9 @@ def main(argv):
     if not args.draft:
         if not args.client or not args.manifest or not args.results_out:
             print("ERROR: 单段正式入口必须提供 --client、--manifest、--results-out；旧方式请显式使用 --draft")
+            return 2
+        if not args.prompt_review:
+            print("ERROR: 正式生视频前必须提供已确认的中文提示词审核文件 --prompt-review")
             return 2
         try:
             with open(args.manifest, encoding="utf-8") as handle:
@@ -2286,7 +2880,8 @@ def main(argv):
                 manifest_path=args.manifest, ledger_path=args.ledger,
                 results_out=args.results_out,
                 allow_ocr_warning=args.allow_ocr_warning, draft=False,
-                max_wait=args.max_wait)[0]
+                max_wait=args.max_wait, budget_cap=args.budget_cap,
+                prompt_review=args.prompt_review)[0]
             if not formal.get("ok"):
                 raise ValueError(formal.get("error") or "单段生成失败")
             url, local = formal.get("videoUrl"), formal.get("localPath")

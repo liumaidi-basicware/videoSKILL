@@ -18,6 +18,7 @@ import product_library  # noqa: E402
 DEFAULT_MODEL = "gpt-image-2"
 IMAGE_MAX_WAIT = 900
 IMAGE_RETRIES = 2
+PRODUCT_BOARD_POLICY_VERSION = "product-board-policy-v2-identity-contract"
 
 
 def _sha256_file(path):
@@ -37,6 +38,72 @@ def reference_fingerprint(reference_urls):
         digest.update(str(value).encode("utf-8"))
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _first(meta, *keys):
+    for key in keys:
+        value = meta.get(key)
+        if value:
+            return value
+    return ""
+
+
+def product_identity_contract(meta):
+    """Normalize product facts into a generation-time identity contract."""
+    meta = meta or {}
+    distinctive = _first(
+        meta, "distinctive_details", "visible_details", "key_visual_features",
+        "features", "usps", "specs")
+    forbidden = _first(meta, "forbidden_variants", "forbidden", "negative_constraints")
+    return {
+        "policy_version": PRODUCT_BOARD_POLICY_VERSION,
+        "product_name": _first(meta, "product_name", "name", "sku"),
+        "product_type": _first(meta, "product_type", "category"),
+        "model": _first(meta, "product_model", "model", "sku"),
+        "color": _first(meta, "product_color", "color"),
+        "material_finish": _first(meta, "material", "materials", "finish", "surface_finish"),
+        "silhouette_proportions": _first(
+            meta, "silhouette", "shape", "dimensions", "size", "scale"),
+        "controls_buttons": _first(meta, "buttons", "controls", "control_layout"),
+        "ports_connectors": _first(meta, "ports", "connectors", "interfaces"),
+        "markings_logo": _first(meta, "logo", "markings", "labels"),
+        "functional_surfaces": _first(
+            meta, "functional_surfaces", "contact_surfaces", "magnetic_surface",
+            "speaker_grille", "wearing_surface"),
+        "distinctive_details": distinctive,
+        "forbidden_variants": forbidden,
+    }
+
+
+def product_identity_contract_text(meta):
+    contract = product_identity_contract(meta)
+    lines = [
+        "[PRODUCT IDENTITY CONTRACT / 产品身份合同]",
+        "Before generating any view, resolve the uploaded references into a fixed physical product specification. This contract is mandatory and overrides generic product-category guesses.",
+        "- Product name/model: %s %s" % (contract.get("product_name") or "", contract.get("model") or ""),
+        "- Category: %s" % (contract.get("product_type") or "same as uploaded reference"),
+        "- Color: %s" % (contract.get("color") or "exact uploaded color, no hue shift"),
+        "- Material/finish: %s" % (contract.get("material_finish") or "exact uploaded material and finish"),
+        "- Silhouette/proportions/size: %s" % (contract.get("silhouette_proportions") or "exact silhouette, thickness, curvature, aspect ratio and scale cues from references"),
+        "- Controls/buttons: %s" % (contract.get("controls_buttons") or "all visible controls/buttons copied exactly from references"),
+        "- Ports/connectors/openings: %s" % (contract.get("ports_connectors") or "all visible ports, connectors, holes and openings copied exactly"),
+        "- Markings/logo/native labels: %s" % (contract.get("markings_logo") or "preserve only markings physically present in the uploaded reference"),
+        "- Functional/contact surfaces: %s" % (contract.get("functional_surfaces") or "preserve any visible functional, magnetic, wearing, mounting or connection surfaces"),
+        "- Distinctive details: %s" % (json.dumps(contract.get("distinctive_details"), ensure_ascii=False) if contract.get("distinctive_details") else "copy every distinctive seam, grille pattern, bevel, curvature and part boundary from the uploaded reference"),
+        "- Forbidden variants: %s" % (json.dumps(contract.get("forbidden_variants"), ensure_ascii=False) if contract.get("forbidden_variants") else "no category swap, no generic accessory, no simplified silhouette, no changed color/material/buttons/ports/logo/scale"),
+        "Nine panels are invalid if any panel changes category, color family, material finish, button count/layout, grille/opening pattern, connector/port position, logo/marking placement, thickness/volume, or relative size.",
+        "中文：产品图先锁定品类、外轮廓、比例大小、颜色、材质、按钮/孔位/接口/Logo、功能/接触面和独特细节；任何一格改变这些身份信息都视为无效。",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def product_board_source_fingerprint(reference_urls, meta):
+    return reference_fingerprint(
+        list(reference_urls or [])[:4] + [
+            PRODUCT_BOARD_POLICY_VERSION,
+            json.dumps(product_identity_contract(meta), ensure_ascii=False,
+                       sort_keys=True, default=str),
+        ])
 
 
 def _state_path(out_dir):
@@ -61,6 +128,30 @@ def _save_state(out_dir, state):
     os.replace(tmp, path)
 
 
+def _result_handoff_fields(state):
+    fields = {}
+    if not isinstance(state, dict):
+        return fields
+    if state.get("result_url"):
+        fields["url"] = state["result_url"]
+        fields["result_url"] = state["result_url"]
+    for key in ("task_id", "request_id", "board_sha256",
+                "product_board_policy_version", "product_identity_contract"):
+        if state.get(key):
+            fields[key] = state[key]
+    return fields
+
+
+def _progress_tick(kind, task_id):
+    def tick(status, waited):
+        if waited == 0:
+            print("[gpt-image-2] %s task %s: %s" % (kind, task_id, status), flush=True)
+        elif waited % 30 == 0:
+            print("[gpt-image-2] %s task %s still processing (%ss)" %
+                  (kind, task_id, waited), flush=True)
+    return tick
+
+
 def product_board_prompt(meta):
     product_type = meta.get("product_type") or "the exact product"
     product_color = meta.get("product_color") or ""
@@ -70,6 +161,7 @@ def product_board_prompt(meta):
                   % product_color) if product_color else ""
     return (
         "Create one 16:9 landscape 3x3 product consistency reference board for %s. "
+        "%s"
         "SOURCE-LOCK: the uploaded reference images are the sole authoritative identity source. "
         "Reconstruct new camera views of that exact physical object; do not substitute a generic item, "
         "redesign it, simplify it, or infer a different product from the text description. "
@@ -87,7 +179,7 @@ def product_board_prompt(meta):
         "No extra products, no invented accessories, no readable generated text, no watermark or logo. "
          "All nine panels show only the product itself; no person, hand, usage scene or lifestyle context. "
         "This is a product identity board, not an advertisement poster. Style: %s.%s" %
-        (product_type, style, color_lock)
+        (product_type, product_identity_contract_text(meta), style, color_lock)
     )
 
 
@@ -115,30 +207,55 @@ def generate(client, sku, *, model=DEFAULT_MODEL, out_dir=None):
                 state.get("source_fingerprint") == source_fingerprint and
                 state.get("model") == model and
                 state.get("board_sha256") == _sha256_file(pending))
+    resumable_download = (not reusable and state.get("status") == "download_pending" and
+                          state.get("source_fingerprint") == source_fingerprint and
+                          state.get("model") == model and state.get("result_url"))
+    if resumable_download:
+        result_url = state["result_url"]
+        br_client.download(result_url, pending, allow_nonpublic_peer=True)
+        state.update({"status": "pending", "board_sha256": _sha256_file(pending)})
+        _save_state(out_dir, state)
+        reusable = True
     if not reusable:
         last_error = None
         result_url = None
         request_id = "product-board-" + reference_fingerprint(
-            [source_fingerprint, model, "16:9", product_board_prompt(meta)])
+            [source_fingerprint, model, "16:9"])
         for attempt in range(IMAGE_RETRIES + 1):
             try:
-                # gpt-image-2 reference-guided generation uses the synchronous
-                # /ai/createImage imageUrls contract. The async endpoint accepted
-                # data URLs but could silently produce text-only output.
-                urls = br_client.create_image(
+                task_id = br_client.create_image_generation(
                     key, product_board_prompt(meta), model=model, count=1,
                     ratio="16:9", resolution="2k", image_urls=reference_urls,
-                    request_id=request_id, timeout=600)
+                    request_id=request_id)
+                print("[gpt-image-2] product board submitted: %s" % task_id, flush=True)
+                urls = br_client.wait_image_generation(
+                    key, task_id, interval=5, max_wait=IMAGE_MAX_WAIT,
+                    on_tick=_progress_tick("product board", task_id))
                 if not urls:
                     raise br_client.BRError("产品九宫格生成未返回图片。")
                 result_url = urls[0]
-                br_client.download(result_url, pending)
+                _save_state(out_dir, {
+                    "status": "download_pending", "model": model,
+                    "source_fingerprint": source_fingerprint,
+                    "source_manifest": product_library.source_manifest(client, sku),
+                    "product_board_policy_version": PRODUCT_BOARD_POLICY_VERSION,
+                    "product_identity_contract": product_identity_contract(meta),
+                    "reference_count": len(reference_urls),
+                    "task_id": task_id,
+                    "request_id": request_id,
+                    "result_url": result_url,
+                })
+                br_client.download(result_url, pending, allow_nonpublic_peer=True)
                 _save_state(out_dir, {
                     "status": "pending", "model": model,
                     "source_fingerprint": source_fingerprint,
                     "source_manifest": product_library.source_manifest(client, sku),
+                    "product_board_policy_version": PRODUCT_BOARD_POLICY_VERSION,
+                    "product_identity_contract": product_identity_contract(meta),
                     "reference_count": len(reference_urls),
+                    "task_id": task_id,
                     "request_id": request_id,
+                    "result_url": result_url,
                     "board_sha256": _sha256_file(pending),
                 })
                 break
@@ -152,7 +269,10 @@ def generate(client, sku, *, model=DEFAULT_MODEL, out_dir=None):
             raise last_error
     record = {"client": client, "sku": sku, "model": model, "status": "pending",
               "path": os.path.relpath(pending, ROOT), "prompt": product_board_prompt(meta),
-              "source_fingerprint": source_fingerprint, "skipped": reusable}
+              "source_fingerprint": source_fingerprint, "skipped": reusable,
+              "product_board_policy_version": PRODUCT_BOARD_POLICY_VERSION,
+              "product_identity_contract": product_identity_contract(meta)}
+    record.update(_result_handoff_fields(_load_state(out_dir)))
     with open(os.path.join(out_dir, "product_board.json"), "w", encoding="utf-8") as handle:
         json.dump(record, handle, ensure_ascii=False, indent=2)
     return record
@@ -160,43 +280,78 @@ def generate(client, sku, *, model=DEFAULT_MODEL, out_dir=None):
 
 def generate_from_reference_urls(api_key, reference_urls, out_dir, *, product_type="the exact product",
                                  product_color="", style_hint="commercial product reference photography",
-                                 model=DEFAULT_MODEL):
+                                 model=DEFAULT_MODEL, product_meta=None):
     """Generate a pending product board directly from uploaded plan references."""
     if not reference_urls:
         raise br_client.BRError("产品板至少需要一张用户上传的产品参考图。")
     os.makedirs(out_dir, exist_ok=True)
-    meta = {"product_type": product_type, "product_color": product_color,
-            "style_hint": style_hint}
-    source_fingerprint = reference_fingerprint(reference_urls[:4])
+    meta = dict(product_meta or {})
+    meta.update({k: v for k, v in {
+        "product_type": product_type,
+        "product_color": product_color,
+        "style_hint": style_hint,
+    }.items() if v and not meta.get(k)})
+    source_fingerprint = product_board_source_fingerprint(reference_urls[:4], meta)
     pending = os.path.join(out_dir, "product_board_pending.jpg")
     state = _load_state(out_dir)
     reusable = (os.path.isfile(pending) and os.path.getsize(pending) > 0 and
                 state.get("source_fingerprint") == source_fingerprint and
                 state.get("model") == model and
                 state.get("board_sha256") == _sha256_file(pending))
+    resumable_download = (not reusable and state.get("status") == "download_pending" and
+                          state.get("source_fingerprint") == source_fingerprint and
+                          state.get("model") == model and state.get("result_url"))
+    if resumable_download:
+        result_url = state["result_url"]
+        br_client.download(result_url, pending, allow_nonpublic_peer=True)
+        state.update({"status": "pending", "board_sha256": _sha256_file(pending)})
+        _save_state(out_dir, state)
+        reusable = True
     if reusable:
-        return {"status": "pending", "model": model, "path": os.path.abspath(pending),
-                "reference_count": len(reference_urls[:4]), "skipped": True,
-                "source_fingerprint": source_fingerprint}
+        result = {"status": "pending", "model": model, "path": os.path.abspath(pending),
+                  "reference_count": len(reference_urls[:4]), "skipped": True,
+                  "source_fingerprint": source_fingerprint,
+                  "product_board_policy_version": PRODUCT_BOARD_POLICY_VERSION,
+                  "product_identity_contract": product_identity_contract(meta)}
+        result.update(_result_handoff_fields(_load_state(out_dir)))
+        return result
     last_error = None
     result_url = None
     request_id = "product-board-" + reference_fingerprint(
-        [source_fingerprint, model, "16:9", product_board_prompt(meta)])
+        [source_fingerprint, model, "16:9"])
     for attempt in range(IMAGE_RETRIES + 1):
         try:
-            urls = br_client.create_image(
+            task_id = br_client.create_image_generation(
                 api_key, product_board_prompt(meta), model=model, count=1,
                 ratio="16:9", resolution="2k", image_urls=reference_urls[:4],
-                request_id=request_id, timeout=600)
+                request_id=request_id)
+            print("[gpt-image-2] product board submitted: %s" % task_id, flush=True)
+            urls = br_client.wait_image_generation(
+                api_key, task_id, interval=5, max_wait=IMAGE_MAX_WAIT,
+                on_tick=_progress_tick("product board", task_id))
             if not urls:
                 raise br_client.BRError("产品九宫格生成未返回图片。")
             result_url = urls[0]
-            br_client.download(result_url, pending)
+            _save_state(out_dir, {
+                "status": "download_pending", "model": model,
+                "source_fingerprint": source_fingerprint,
+                "reference_count": len(reference_urls[:4]),
+                "product_board_policy_version": PRODUCT_BOARD_POLICY_VERSION,
+                "product_identity_contract": product_identity_contract(meta),
+                "task_id": task_id,
+                "request_id": request_id,
+                "result_url": result_url,
+            })
+            br_client.download(result_url, pending, allow_nonpublic_peer=True)
             _save_state(out_dir, {
                 "status": "pending", "model": model,
                 "source_fingerprint": source_fingerprint,
                 "reference_count": len(reference_urls[:4]),
+                "product_board_policy_version": PRODUCT_BOARD_POLICY_VERSION,
+                "product_identity_contract": product_identity_contract(meta),
+                "task_id": task_id,
                 "request_id": request_id,
+                "result_url": result_url,
                 "board_sha256": _sha256_file(pending),
             })
             break
@@ -209,9 +364,13 @@ def generate_from_reference_urls(api_key, reference_urls, out_dir, *, product_ty
                 time.sleep(5 * (attempt + 1))
     else:
         raise last_error
-    return {"status": "pending", "model": model, "path": os.path.abspath(pending),
-            "reference_count": len(reference_urls[:4]), "prompt": product_board_prompt(meta),
-            "source_fingerprint": source_fingerprint}
+    result = {"status": "pending", "model": model, "path": os.path.abspath(pending),
+              "reference_count": len(reference_urls[:4]), "prompt": product_board_prompt(meta),
+              "source_fingerprint": source_fingerprint,
+              "product_board_policy_version": PRODUCT_BOARD_POLICY_VERSION,
+              "product_identity_contract": product_identity_contract(meta)}
+    result.update(_result_handoff_fields(_load_state(out_dir)))
+    return result
 
 
 def confirm(client, sku):

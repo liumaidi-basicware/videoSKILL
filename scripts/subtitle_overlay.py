@@ -341,6 +341,14 @@ def build_scenes(lines, safe_zone_doc, width=1080, height=1920, fps=30,
             "right_px": int(ln.get("right_px", right_px)),
             "max_height_px": int(ln.get("max_height_px", max_h)),
         }
+        # 字幕设计器可以给出固定内容宽度和层级字号；保留这些字段，
+        # 避免渲染器把所有横屏字幕拉成同一条通栏。
+        if ln.get("width_px") is not None:
+            sc["width_px"] = int(ln["width_px"])
+        if ln.get("track_index") is not None:
+            sc["track_index"] = int(ln["track_index"])
+        if ln.get("variant"):
+            sc["variant"] = str(ln["variant"])
         scenes.append(sc)
 
     duration = max((s["end"] for s in scenes), default=6)
@@ -387,7 +395,10 @@ def _probe_stream(ffprobe, path):
              "-show_entries", "stream=pix_fmt,codec_name",
              "-of", "default=nk=1:nw=1", path],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        lines = p.stdout.decode("utf-8", "replace").strip().splitlines()
+        output = p.stdout
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", "replace")
+        lines = (output or "").strip().splitlines()
         codec = lines[0] if len(lines) > 0 else None
         pix_fmt = lines[1] if len(lines) > 1 else None
         return codec, pix_fmt

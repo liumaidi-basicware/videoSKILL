@@ -191,6 +191,12 @@ def _brief_path(client):
     return os.path.join(_client_dir(client), "brief.json")
 
 
+def _default_brief(client):
+    return {"client": client, "revision": 0, "product_type": None, "usps": [], "specs": {},
+            "slogans": [], "texts": [], "images": [], "style_hints": [],
+            "render_profile": None, "render_plan": None, "ppt_files": []}
+
+
 def _load_brief(client):
     p = _brief_path(client)
     if os.path.isfile(p):
@@ -198,13 +204,13 @@ def _load_brief(client):
             brief = json.load(f)
         if brief.get("client") not in (None, client):
             raise ValueError("BRIEF_CLIENT_MISMATCH")
-        brief["client"] = client
-        brief.setdefault("revision", 0)
-        return brief
+        normalized = _default_brief(client)
+        normalized.update(brief)
+        normalized["client"] = client
+        normalized.setdefault("revision", 0)
+        return normalized
     recovered = _recovered_image_entries(client)
-    brief = {"client": client, "revision": 0, "product_type": None, "usps": [], "specs": {},
-            "slogans": [], "texts": [], "images": [], "style_hints": [],
-            "render_profile": None, "render_plan": None, "ppt_files": []}
+    brief = _default_brief(client)
     if recovered:
         brief["images"] = recovered
         _save_brief(client, brief, replace=True)
@@ -390,9 +396,9 @@ def set_profile(client, product_type=None, render_profile=None, style_hints=None
     if style_hints is not None:
         brief["style_hints"] = style_hints
     _save_brief(client, brief)
-    return {"product_type": brief["product_type"],
-            "render_profile": brief["render_profile"],
-            "style_hints": brief["style_hints"]}
+    return {"product_type": brief.get("product_type"),
+            "render_profile": brief.get("render_profile"),
+            "style_hints": brief.get("style_hints", [])}
 
 
 def set_render_plan(client, plan):
@@ -509,14 +515,26 @@ def _product_color_lock(client):
 
 
 def _create_one(k, prompt, image_urls, ratio, resolution, model):
-    kw = {"count": 1, "resolution": resolution, "ratio": ratio,
-          "image_urls": image_urls or []}
-    if model:
-        kw["model"] = model
-    urls = br_client.create_image(k, prompt, **kw)
+    task_id = br_client.create_image_generation(
+        k, prompt, model=model or "seedream-5.0", count=1,
+        resolution=resolution, ratio=ratio, image_urls=image_urls or [])
+    print("[asset-prep] image task submitted: %s" % task_id, flush=True)
+    urls = br_client.wait_image_generation(
+        k, task_id, interval=5, max_wait=900,
+        on_tick=_image_task_tick("asset image", task_id))
     if not urls:
-        raise SystemExit("createImage returned no image")
+        raise SystemExit("image generation returned no image")
     return urls[0]
+
+
+def _image_task_tick(kind, task_id):
+    def tick(status, waited):
+        if waited == 0:
+            print("[asset-prep] %s task %s: %s" % (kind, task_id, status), flush=True)
+        elif waited % 30 == 0:
+            print("[asset-prep] %s task %s still processing (%ss)" %
+                  (kind, task_id, waited), flush=True)
+    return tick
 
 
 def _save_image(client, url, tag, prompt, status="pending", variant=None,
@@ -527,7 +545,7 @@ def _save_image(client, url, tag, prompt, status="pending", variant=None,
     safe_tag = (tag or "gen").replace("/", "_").replace(" ", "_")
     suffix = ("_" + variant) if variant else ""
     dest = os.path.join(d, "images", "%s_%d%s.png" % (safe_tag, int(_t.time() * 1000) % 10**9, suffix))
-    br_client.download(url, dest)
+    br_client.download(url, dest, allow_nonpublic_peer=True)
     rel = os.path.relpath(dest, ROOT)
     # brief 存相对路径（可移植）；返回给 agent 的 entry 额外带绝对路径，
     # 便于在支持 markdown 的 Agent 对话框中用 ![](abspath) 展示给客户预览。
@@ -547,7 +565,7 @@ def _save_image(client, url, tag, prompt, status="pending", variant=None,
 
 
 def clean_image(client, source, prompt, tag="product", ratio="1:1", resolution="2k"):
-    """Run one synchronous gpt-image-2 img2img cleanup and save it pending."""
+    """Run one async gpt-image-2 img2img cleanup and save it pending."""
     import key_setup
     k = key_setup.load_key()
     if not k:
@@ -556,12 +574,10 @@ def clean_image(client, source, prompt, tag="product", ratio="1:1", resolution="
     if not os.path.isfile(src):
         raise SystemExit("source not found: %s" % source)
     ref = br_client.to_image_ref(src)
-    urls = br_client.create_image(
-        k, _style_prompt(client, prompt) + _product_color_lock(client), model="gpt-image-2", count=1,
-        resolution=resolution, ratio=ratio, image_urls=[ref], timeout=600)
-    if not urls:
-        raise SystemExit("gpt-image-2 cleanup returned no image")
-    return _save_image(client, urls[0], tag, prompt, status="pending",
+    url = _create_one(
+        k, _style_prompt(client, prompt) + _product_color_lock(client),
+        [ref], ratio, resolution, "gpt-image-2")
+    return _save_image(client, url, tag, prompt, status="pending",
                        extra={"source": os.path.relpath(src, ROOT),
                               "source_kind": "product_or_screenshot",
                               "processing_kind": "cleaned_img2img",
@@ -784,8 +800,8 @@ def standardize(client, source, prompt, tag="", model=None, ratio="1:1",
 
     调用方式对齐 BasicRouter 文档「图像生成」章节（异步 /v1/image-generations）：
     提交任务立即返回 taskId，轮询 GET /v1/image-generations/{taskId} 拿结果。
-    这与 gen_image() 走的同步 /ai/createImage（立即返回 imageUrls）是两条不同接口，
-    standardize 专用新的异步接口，互不替代。
+    gen_image()/clean/cutout 等素材生成入口也使用同一类异步提交+轮询，
+    不依赖旧版同步长连接。
 
     source 支持三种输入形态：
       - 商品图 / 网页截图（图片文件）：直接作图生图参考图。
@@ -904,13 +920,10 @@ def cutout(client, rel_or_path, prompt="remove background, clean product cutout 
     if not os.path.isfile(src):
         raise SystemExit("image not found: %s" % rel_or_path)
     ref = br_client.to_image_ref(src)
-    urls = br_client.create_image(k, prompt, model="kling-v3-omni-image",
-                                  count=1, resolution="2k", ratio="1:1", image_urls=[ref])
-    if not urls:
-        raise SystemExit("cutout returned no image")
+    url = _create_one(k, prompt, [ref], "1:1", "2k", "kling-v3-omni-image")
     base = os.path.splitext(os.path.basename(src))[0]
     dest = os.path.join(_client_dir(client), "images", base + "-cutout.png")
-    br_client.download(urls[0], dest)
+    br_client.download(url, dest, allow_nonpublic_peer=True)
     entry = {"path": os.path.relpath(dest, ROOT), "tag": "cutout",
              "generated": True, "status": "pending", "prompt": prompt}
     brief = _load_brief(client)

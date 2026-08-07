@@ -7,7 +7,8 @@ STORYBOARD_RATIO = "16:9"
 
 def output_ratio(plan, default="9:16"):
     """Read the canonical plan field, accepting legacy aliases on import."""
-    value = (plan or {}).get("output_ratio") or (plan or {}).get("ratio") or default
+    value = ((plan or {}).get("output_ratio") or (plan or {}).get("ratio") or
+             (plan or {}).get("video_aspect_ratio") or default)
     if value not in OUTPUT_RATIOS:
         raise ValueError("OUTPUT_RATIO_INVALID: %s" % value)
     return value

@@ -17,9 +17,21 @@ import json  # noqa: E402
 class ProductConsistencyTests(unittest.TestCase):
     def test_product_board_prompt_requires_nine_distinct_views(self):
         prompt = product_board.product_board_prompt({"product_type": "咖啡机"})
-        for term in ("3x3", "front hero", "rear", "macro material/detail", "bottom/connection/detail", "identical geometry"):
+        for term in ("3x3", "front hero", "rear", "macro material/detail",
+                     "bottom/connection/detail", "identical geometry",
+                     "PRODUCT IDENTITY CONTRACT", "Color", "Material/finish",
+                     "Controls/buttons", "Ports/connectors/openings",
+                     "Functional/contact surfaces"):
             self.assertIn(term, prompt)
         self.assertIn("no person, hand, usage scene", prompt)
+
+    def test_product_board_fingerprint_includes_identity_contract_policy(self):
+        refs = ["data:image/png;base64,a"]
+        basic = {"product_type": "speaker", "product_color": "yellow"}
+        changed = dict(basic, buttons="front power button plus bluetooth button")
+        self.assertNotEqual(
+            product_board.product_board_source_fingerprint(refs, basic),
+            product_board.product_board_source_fingerprint(refs, changed))
 
     def test_resolve_reports_confirmed_product_board(self):
         with tempfile_product() as directory:
@@ -97,26 +109,77 @@ class ProductConsistencyTests(unittest.TestCase):
         with mock.patch.object(br_client, "_request", side_effect=request):
             br_client.create_video("sk-test", "continue", model="seedance-2.0",
                                   extend_video_url="https://example.test/previous.mp4")
-        self.assertTrue(captured["body"]["extend"])
-        self.assertEqual(captured["body"]["videoUrl"], "https://example.test/previous.mp4")
+        self.assertEqual(captured["body"]["videoUrls"],
+                         ["https://example.test/previous.mp4"])
 
-    def test_product_board_uses_sync_img2img_and_regenerates_when_source_changes(self):
+    def test_product_board_uses_async_retrieve_and_regenerates_when_source_changes(self):
         with tempfile.TemporaryDirectory() as directory:
             calls = []
-            def create_image(_key, _prompt, **kwargs):
+            waits = []
+            def create_image_generation(_key, _prompt, **kwargs):
                 calls.append(kwargs["image_urls"])
+                return "img_%d" % len(calls)
+            def wait_image_generation(_key, task_id, **_kwargs):
+                waits.append(task_id)
                 return ["https://example.test/board.jpg"]
-            def download(_url, path):
+            download_kwargs = []
+            def download(_url, path, **kwargs):
+                download_kwargs.append(kwargs)
                 with open(path, "wb") as handle:
                     handle.write(b"board")
-            with mock.patch.object(product_board.br_client, "create_image", side_effect=create_image), \
+            with mock.patch.object(product_board.br_client, "create_image_generation",
+                                   side_effect=create_image_generation), \
+                 mock.patch.object(product_board.br_client, "wait_image_generation",
+                                   side_effect=wait_image_generation), \
                  mock.patch.object(product_board.br_client, "download", side_effect=download):
-                product_board.generate_from_reference_urls("k", ["data:image/png;base64,AAA"], directory)
-                product_board.generate_from_reference_urls("k", ["data:image/png;base64,AAA"], directory)
-                product_board.generate_from_reference_urls("k", ["data:image/png;base64,BBB"], directory)
+                first = product_board.generate_from_reference_urls("k", ["data:image/png;base64,AAA"], directory)
+                reused = product_board.generate_from_reference_urls("k", ["data:image/png;base64,AAA"], directory)
+                second = product_board.generate_from_reference_urls("k", ["data:image/png;base64,BBB"], directory)
             self.assertEqual(len(calls), 2)
+            self.assertEqual(waits, ["img_1", "img_2"])
             self.assertEqual(calls[0], ["data:image/png;base64,AAA"])
             self.assertEqual(calls[1], ["data:image/png;base64,BBB"])
+            self.assertTrue(all(item.get("allow_nonpublic_peer")
+                                for item in download_kwargs))
+            state = product_board._load_state(directory)
+            self.assertEqual(state["task_id"], "img_2")
+            self.assertEqual(state["result_url"], "https://example.test/board.jpg")
+            self.assertEqual(first["url"], "https://example.test/board.jpg")
+            self.assertEqual(reused["result_url"], "https://example.test/board.jpg")
+            self.assertEqual(second["task_id"], "img_2")
+
+    def test_product_board_resumes_download_pending_without_resubmitting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source_fp = product_board.product_board_source_fingerprint(
+                ["data:image/png;base64,AAA"],
+                {"product_type": "the exact product",
+                 "style_hint": "commercial product reference photography"})
+            product_board._save_state(directory, {
+                "status": "download_pending",
+                "model": product_board.DEFAULT_MODEL,
+                "source_fingerprint": source_fp,
+                "task_id": "img_existing",
+                "request_id": "req_existing",
+                "result_url": "https://example.test/board.jpg",
+            })
+
+            def download(_url, path, **_kwargs):
+                with open(path, "wb") as handle:
+                    handle.write(b"board")
+
+            with mock.patch.object(product_board.br_client, "create_image_generation",
+                                   side_effect=AssertionError("resubmitted")), \
+                 mock.patch.object(product_board.br_client, "wait_image_generation",
+                                   side_effect=AssertionError("repolled")), \
+                 mock.patch.object(product_board.br_client, "download",
+                                   side_effect=download):
+                result = product_board.generate_from_reference_urls(
+                    "k", ["data:image/png;base64,AAA"], directory)
+            state = product_board._load_state(directory)
+            self.assertTrue(result["skipped"])
+            self.assertEqual(state["status"], "pending")
+            self.assertEqual(state["task_id"], "img_existing")
+            self.assertEqual(state["result_url"], "https://example.test/board.jpg")
 
     def test_confirm_binds_source_and_board_content_hashes(self):
         with tempfile_product() as directory:

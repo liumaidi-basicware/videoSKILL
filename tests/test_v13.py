@@ -150,6 +150,26 @@ class TestProductLibrary(unittest.TestCase):
         self.assertNotIn("front", called)
         self.assertIn("side", called)
 
+    def test_07b_gen_view_uses_async_image_generation(self):
+        pl.create_product("acme", "chair")
+
+        def fake_download(_url, dest, **_kwargs):
+            _make_png(dest)
+
+        with patch.object(pl.key_setup, "load_key", return_value="sk-test"), \
+             patch.object(pl.br_client, "create_image",
+                          side_effect=AssertionError("legacy sync path used")), \
+             patch.object(pl.br_client, "create_image_generation",
+                          side_effect=["img_v1", "img_v2"]) as create, \
+             patch.object(pl.br_client, "wait_image_generation",
+                          return_value=["https://x/view.png"]), \
+             patch.object(pl.br_client, "download", side_effect=fake_download):
+            result = pl.gen_view("acme", "chair", "side", refine=True)
+
+        self.assertTrue(os.path.isfile(result["pass1"]))
+        self.assertTrue(os.path.isfile(result["pass2"]))
+        self.assertEqual(create.call_count, 2)
+
     # T08 confirm_view — v2 晋升，v1 清除
     def test_08_confirm_view(self):
         pl.create_product("acme", "chair")
@@ -422,14 +442,19 @@ class TestBrClient(unittest.TestCase):
         _make_png(tmp.name); tmp.close()
         try:
             call_count = [0]
-            def fake_create_image(api_key, prompt, **kw):
+            def fake_create_image_generation(api_key, prompt, **kw):
                 call_count[0] += 1
-                return ["https://fake/hosted.png"]
+                return "img-host"
             def fake_dl(url, dest):
                 shutil.copyfile(tmp.name, dest)
 
-            with patch.object(brc, "create_image", side_effect=fake_create_image), \
-                 patch.object(brc, "download",     side_effect=fake_dl):
+            with patch.object(brc, "create_image",
+                              side_effect=AssertionError("legacy sync path used")), \
+                 patch.object(brc, "create_image_generation",
+                              side_effect=fake_create_image_generation), \
+                 patch.object(brc, "wait_image_generation",
+                              return_value=["https://fake/hosted.png"]), \
+                 patch.object(brc, "download", side_effect=fake_dl):
                 r1 = brc.host_image("sk-test", tmp.name)
                 r2 = brc.host_image("sk-test", tmp.name)
             self.assertEqual(call_count[0], 1, "缓存失效：API 被调用了 %d 次" % call_count[0])

@@ -123,6 +123,9 @@ class TestResultsPropagation(unittest.TestCase):
              patch.object(ve.key_setup, "load_key", return_value="k"), \
              patch.object(ve.br_client, "create_video", return_value="task1"), \
              patch.object(ve.br_client, "get_video", return_value={"status": "succeeded", "videoUrl": "http://x/a.mp4"}), \
+             patch.object(ve, "_model_catalog", return_value={"records": {}, "aliases": {}}), \
+             patch.object(ve.br_client, "list_models", return_value=[]), \
+             patch.object(ve, "_available_models_set", return_value=set()), \
              patch.object(ve.br_client, "download", return_value=None):
             results = ve.render_batch(segs, verbose=False, draft=True)
         self.assertTrue(results[0]["ocr_warning"])
@@ -141,6 +144,9 @@ class TestResultsPropagation(unittest.TestCase):
              patch.object(ve.key_setup, "load_key", return_value="k"), \
              patch.object(ve.br_client, "create_video", return_value="task1"), \
              patch.object(ve.br_client, "wait_video", return_value="http://x/a.mp4"), \
+             patch.object(ve, "_model_catalog", return_value={"records": {}, "aliases": {}}), \
+             patch.object(ve.br_client, "list_models", return_value=[]), \
+             patch.object(ve, "_available_models_set", return_value=set()), \
              patch.object(ve.br_client, "to_image_ref", side_effect=lambda u, **kw: u), \
              patch.object(ve.br_client, "download", return_value=None):
             results = ve.render_chained(segs, verbose=False, draft=True)
@@ -171,6 +177,9 @@ class TestSingleRenderOcrGate(unittest.TestCase):
         stdout = io.StringIO()
         with patch.object(ve, "render", side_effect=fake_render), \
              patch.object(ve.key_setup, "load_key", return_value="k"), \
+             patch.object(ve, "_model_catalog", return_value={"records": {}, "aliases": {}}), \
+             patch.object(ve.br_client, "list_models", return_value=[]), \
+             patch.object(ve, "_available_models_set", return_value=set()), \
              redirect_stdout(stdout):
             rc = ve.main(argv)
         return rc, json.loads(stdout.getvalue())

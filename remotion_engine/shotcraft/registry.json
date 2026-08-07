@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "cards": [
+    {"id":"spotlight-hero-card","tier":"production_core","ratios":["16:9","9:16","1:1"],"source_modes":["generated_video_plus_overlay","image_composition"],"required_assets":["hero"],"qa_offsets":[0.1,0.5,0.85]},
+    {"id":"before-after-slider-scrub","tier":"production_core","ratios":["16:9","9:16","1:1"],"source_modes":["image_composition","page_capture"],"required_assets":["before","after"],"qa_offsets":[0.1,0.5,0.85]},
+    {"id":"shared-element-morph","tier":"production_core","ratios":["16:9","9:16","1:1"],"source_modes":["page_capture","image_composition"],"required_assets":["source","target"],"qa_offsets":[0.15,0.5,0.9]},
+    {"id":"line-carry-transition","tier":"production_core","ratios":["16:9","9:16","1:1"],"source_modes":["generated_video_plus_overlay","page_capture"],"required_assets":[],"qa_offsets":[0.1,0.5,0.9]},
+    {"id":"title-demote-to-label","tier":"production_core","ratios":["16:9","9:16","1:1"],"source_modes":["generated_video_plus_overlay","image_composition","page_capture"],"required_assets":[],"qa_offsets":[0.1,0.55,0.9]},
+    {"id":"brand-frame-snap","tier":"production_core","ratios":["16:9","9:16","1:1"],"source_modes":["image_composition","generated_video_plus_overlay"],"required_assets":[],"qa_offsets":[0.15,0.5,0.85]},
+    {"id":"logo-sting-button","tier":"production_core","ratios":["16:9","9:16","1:1"],"source_modes":["image_composition"],"required_assets":["logo"],"qa_offsets":[0.1,0.5,0.9]},
+    {"id":"data-viz-landscape-open","tier":"production_core","ratios":["16:9"],"source_modes":["page_capture","image_composition"],"required_assets":["data"],"qa_offsets":[0.1,0.5,0.85]},
+    {"id":"document-typewriter-reveal","tier":"production_core","ratios":["16:9","9:16","1:1"],"source_modes":["page_capture","image_composition"],"required_assets":["document"],"qa_offsets":[0.1,0.5,0.9]},
+    {"id":"timeline-travel","tier":"production_core","ratios":["16:9","9:16","1:1"],"source_modes":["page_capture","image_composition"],"required_assets":["timeline"],"qa_offsets":[0.1,0.5,0.85]}
+  ]
+}

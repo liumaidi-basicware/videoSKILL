@@ -31,6 +31,7 @@ import sys
 import json
 import zipfile
 import shutil
+import glob
 import argparse
 import subprocess
 import platform
@@ -49,6 +50,7 @@ ENGINE = os.path.join(ROOT, "remotion_engine")
 COMPOSITION = "Shots"
 CONTENT_COMPOSITION = "Content"  # 文档/PPT 内容动效（remotion-com-skills 组件库）
 KINETIC_COMPOSITION = "HorizontalKinetic"  # 横版口播：字幕+章节+卡片+PIP
+SHOTCRAFT_COMPOSITION = "Shotcraft"
 REMOTE_MEDIA_ALLOWLIST_ENV = "REMOTION_MEDIA_ALLOWLIST"
 
 
@@ -74,6 +76,17 @@ def ensure_ffmpeg_on_path():
         if _has("ffmpeg") and _has("ffprobe"):
             return True, "已注入 static-ffmpeg: " + os.path.dirname(ff)
     except Exception as e:  # noqa
+        try:
+            import static_ffmpeg
+            root = os.path.dirname(os.path.abspath(static_ffmpeg.__file__))
+            matches = glob.glob(os.path.join(root, "bin", "**", "ffmpeg"), recursive=True)
+            probes = glob.glob(os.path.join(root, "bin", "**", "ffprobe"), recursive=True)
+            if matches and probes and os.path.dirname(matches[0]) == os.path.dirname(probes[0]):
+                os.environ["PATH"] = os.path.dirname(matches[0]) + os.pathsep + os.environ.get("PATH", "")
+                if _has("ffmpeg") and _has("ffprobe"):
+                    return True, "已直接注入 static-ffmpeg 二进制: " + os.path.dirname(matches[0])
+        except Exception:
+            pass
         return False, "static-ffmpeg 不可用: %s" % e
     return False, "未找到 ffmpeg/ffprobe"
 
@@ -276,7 +289,7 @@ def _stage_local_media(shotlist, stage_dir=None):
     media_objects = list(shotlist.get("shots") or [])
     media_objects.append(shotlist)
     for shot in media_objects:
-        for field in ("image", "video", "videoPath", "pipVideoPath", "audioPath"):
+        for field in ("image", "video", "videoPath", "pipVideoPath", "audioPath", "source"):
             value = shot.get(field)
             if not isinstance(value, str) or value.startswith("data:"):
                 continue
@@ -301,6 +314,25 @@ def _stage_local_media(shotlist, stage_dir=None):
                 shutil.copy2(source, target)
             staged[value] = public_rel + "/" + name
             shot[field] = staged[value]
+        assets = shot.get("assets")
+        if isinstance(assets, list):
+            staged_assets = []
+            for value in assets:
+                if not isinstance(value, str) or value.startswith("@"):
+                    staged_assets.append(value)
+                    continue
+                local_value = value[len("file://"):] if value.startswith("file://") else value
+                source = next((p for p in (local_value, os.path.join(ROOT, local_value),
+                                           os.path.join(ENGINE, "public", local_value)) if os.path.isfile(p)), None)
+                if not source:
+                    raise SystemExit("ERROR: Remotion Shotcraft 素材不存在: %s" % value)
+                digest = hashlib.sha256(open(source, "rb").read()).hexdigest()
+                name = digest[:24] + os.path.splitext(source)[1].lower()
+                target = os.path.join(public_dir, name)
+                if not os.path.isfile(target):
+                    shutil.copy2(source, target)
+                staged_assets.append(public_rel + "/" + name)
+            shot["assets"] = staged_assets
     return shotlist
 
 
@@ -445,6 +477,31 @@ def render(shotlist_path, out_path, quality="high", composition=COMPOSITION):
     return out_path
 
 
+def render_shotcraft(spec_path, out_path, quality="high"):
+    """Render a validated Shotcraft spec through the existing deterministic Shots composition.
+
+    Shotcraft cards are deliberately compiled to clean media-only shots here;
+    exact typography remains owned by HyperFrames so generated and deterministic
+    layers never compete for text ownership.
+    """
+    sys.path.insert(0, HERE)
+    import shotcraft_qc
+    with open(spec_path, encoding="utf-8") as handle:
+        spec = json.load(handle)
+    report = shotcraft_qc.check(spec)
+    if not report["passed"]:
+        raise SystemExit("ERROR: SHOTCRAFT_QC_FAILED: %s" % ", ".join(report["errors"]))
+    shotlist = copy.deepcopy(spec)
+    fd, temporary = tempfile.mkstemp(prefix=".shotcraft-", suffix=".json", dir=os.path.dirname(os.path.abspath(out_path)) or ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(shotlist, handle, ensure_ascii=False)
+        return render(temporary, out_path, quality, composition=SHOTCRAFT_COMPOSITION)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
+
+
 def doctor():
     print("=== Remotion 引擎体检 ===")
     print("node:", shutil.which("node") or "缺失")
@@ -485,6 +542,10 @@ def main():
     rk.add_argument("--spec", required=True, help="HorizontalKinetic props JSON")
     rk.add_argument("--out", required=True)
     rk.add_argument("--quality", default="high", choices=["draft", "standard", "high"])
+    rs = sub.add_parser("render-shotcraft", help="渲染已校验的 Shotcraft 确定性包装 spec")
+    rs.add_argument("--spec", required=True)
+    rs.add_argument("--out", required=True)
+    rs.add_argument("--quality", default="high", choices=["draft", "standard", "high"])
     ni = sub.add_parser("normalize-input", help="将口播源统一为1920x1080 H.264/AAC")
     ni.add_argument("--input", required=True)
     ni.add_argument("--out", required=True)
@@ -496,6 +557,8 @@ def main():
         render(a.spec, a.out, a.quality, composition=CONTENT_COMPOSITION)
     elif a.cmd == "render-kinetic":
         render(a.spec, a.out, a.quality, composition=KINETIC_COMPOSITION)
+    elif a.cmd == "render-shotcraft":
+        render_shotcraft(a.spec, a.out, a.quality)
     elif a.cmd == "normalize-input":
         normalize_input(a.input, a.out)
     elif a.cmd == "doctor":

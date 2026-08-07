@@ -20,6 +20,8 @@ class StoryboardRenderHandoffTests(unittest.TestCase):
             "storyboard_path": "/tmp/storyboard-revision-that-is-gone.jpg",
         }
         with mock.patch.object(video_engine.key_setup, "load_key", return_value="sk-test"), \
+             mock.patch.object(video_engine, "_model_catalog", return_value={"records": {}}), \
+             mock.patch.object(video_engine, "_available_models_set", return_value=set()), \
              mock.patch.object(video_engine.br_client, "create_video") as submit:
             with self.assertRaisesRegex(ValueError, "STALE_STORYBOARD"):
                 video_engine.render_batch([segment], verbose=False, draft=True)
@@ -45,6 +47,8 @@ class StoryboardRenderHandoffTests(unittest.TestCase):
                 "storyboard_result_fingerprint": "old-revision",
             }
             with mock.patch.object(video_engine.key_setup, "load_key", return_value="sk-test"), \
+                 mock.patch.object(video_engine, "_model_catalog", return_value={"records": {}}), \
+                 mock.patch.object(video_engine, "_available_models_set", return_value=set()), \
                  mock.patch.object(video_engine.br_client, "create_video") as submit:
                 with self.assertRaisesRegex(ValueError, "STALE_STORYBOARD"):
                     video_engine.render_batch([segment], verbose=False, draft=True)

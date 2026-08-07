@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime
 
 from artifact_contract import file_sha256, sha256_json
+import schema_validate
 
 VERDICTS = {"pending", "accepted", "rejected"}
 TECHNICAL_REQUIRED = {"video_integrity", "audio_integrity"}
@@ -236,6 +237,8 @@ def attach_to_result(result, review):
 
 
 def save_review(review, path):
+    # 契约强制：take-review schema 运行时校验（fail-closed，防畸形评审落盘）
+    schema_validate.enforce(review, "take-review", context="take_review.save_review")
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as handle:

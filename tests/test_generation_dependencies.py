@@ -140,6 +140,32 @@ class GenerationDependencyTests(unittest.TestCase):
             json.dump({"stage": "brief", "changed": True}, handle)
         self.assertFalse(run_manifest.approval_is_current(manifest, "brief"))
 
+    def test_storyboard_approval_hash_includes_result_child_images(self):
+        manifest = run_manifest.create_manifest("acme", "run-1")
+        self.approve(manifest, "brief")
+        self.approve(manifest, "script")
+        self.approve(manifest, "cast_board")
+        shot = os.path.join(self.directory, "shot.jpg")
+        product = os.path.join(self.directory, "product_board.jpg")
+        for path, data in ((shot, b"shot-v1"), (product, b"product-v1")):
+            with open(path, "wb") as handle:
+                handle.write(data)
+        result = os.path.join(self.directory, "storyboard_result.json")
+        with open(result, "w", encoding="utf-8") as handle:
+            json.dump({
+                "product_board": {"path": product, "status": "confirmed"},
+                "shots": [{"id": "s1", "path": shot}],
+            }, handle)
+        run_manifest.mark_generation_started(manifest, "storyboard")
+        run_manifest.mark_generation_finished(manifest, "storyboard", [result])
+        run_manifest.approve(manifest, "storyboard", strict=True)
+        artifacts = manifest["generation"]["storyboard"]["artifacts"]
+        self.assertIn(os.path.abspath(shot), {item["path"] for item in artifacts})
+        self.assertTrue(run_manifest.approval_is_current(manifest, "storyboard"))
+        with open(shot, "wb") as handle:
+            handle.write(b"shot-v2")
+        self.assertFalse(run_manifest.approval_is_current(manifest, "storyboard"))
+
     def test_regeneration_revokes_stage_and_downstream_approvals(self):
         manifest = run_manifest.create_manifest("acme", "run-1")
         for stage in ("brief", "script"):

@@ -36,9 +36,55 @@ class VideoManifestFailClosedTests(unittest.TestCase):
         get_video.assert_called_once_with("sk-test", "task-1")
         create.assert_not_called()
         self.assertEqual(download.call_args_list[1].args[0], "https://cdn.example/new.mp4")
+
+    def test_completed_video_download_allows_configured_proxy_peer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = os.path.join(directory, "video.mp4")
+            with mock.patch.object(ve.br_client, "download", return_value=out) as download:
+                result = ve._download_completed_video(
+                    "sk-test", "task-1", "https://cdn.example/video.mp4", out)
+        self.assertEqual(result, out)
+        self.assertTrue(download.call_args.kwargs["allow_nonpublic_peer"])
+
     def test_batch_requires_manifest_by_default(self):
         with self.assertRaisesRegex(ValueError, "FORMAL_VIDEO_REQUIRES"):
             ve.render_batch([], client="acme", verbose=False)
+
+    def test_formal_batch_requires_prompt_review_after_manifest_args(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path = os.path.join(directory, "run_manifest.json")
+            results_path = os.path.join(directory, "batch_results.json")
+            manifest = {"handoffs": {"video": {"segments": {}}}}
+            with open(manifest_path, "w", encoding="utf-8") as handle:
+                json.dump(manifest, handle)
+            with self.assertRaisesRegex(ValueError, "PROMPT_REVIEW_REQUIRED"):
+                ve.render_batch([], client="acme", verbose=False,
+                                manifest=manifest, manifest_path=manifest_path,
+                                results_out=results_path)
+
+    def test_formal_chain_requires_prompt_review_after_manifest_args(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path = os.path.join(directory, "run_manifest.json")
+            results_path = os.path.join(directory, "batch_results.json")
+            manifest = {"handoffs": {"video": {"segments": {}}}}
+            with open(manifest_path, "w", encoding="utf-8") as handle:
+                json.dump(manifest, handle)
+            with self.assertRaisesRegex(ValueError, "PROMPT_REVIEW_REQUIRED"):
+                ve.render_chained([], client="acme", verbose=False,
+                                  manifest=manifest, manifest_path=manifest_path,
+                                  results_out=results_path)
+
+    def test_cli_formal_single_requires_prompt_review_before_manifest_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path = os.path.join(directory, "missing.json")
+            results_path = os.path.join(directory, "single_results.json")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                code = ve.main(["--text", "hello", "--client", "acme",
+                                "--manifest", manifest_path,
+                                "--results-out", results_path])
+            self.assertEqual(code, 2)
+            self.assertIn("--prompt-review", out.getvalue())
 
     def test_draft_preserves_legacy_function_entry(self):
         with mock.patch.object(ve.key_setup, "load_key", return_value="sk-test"):
@@ -49,6 +95,91 @@ class VideoManifestFailClosedTests(unittest.TestCase):
         manifest = {"handoffs": {"video": {"segments": {"s1": "old"}}}}
         with self.assertRaisesRegex(ValueError, "VIDEO_HANDOFF_MISMATCH"):
             ve._manifest_handoff_matches(manifest, [segment])
+
+    def test_formal_video_trusts_typed_generated_remote_references(self):
+        segment = {
+            "id": "s1",
+            "urls": [
+                "https://cdn.example/product-board.png",
+                "https://cdn.example/storyboard.png",
+            ],
+            "references": [
+                {"url": "https://cdn.example/product-board.png",
+                 "source": "asset_refs.product_boards",
+                 "type": "product_board"},
+                {"url": "https://cdn.example/storyboard.png",
+                 "source": "storyboard",
+                 "type": "storyboard_composition"},
+            ],
+        }
+        ve._validate_references([segment], "acme", manifest={})
+
+    def test_formal_render_batch_trusts_typed_generated_remote_references(self):
+        with tempfile.TemporaryDirectory() as directory:
+            product_url = "https://cdn.example/product-board.png"
+            segment = {
+                "id": "s1",
+                "text": "hello",
+                "dialogue": "hello",
+                "urls": [product_url],
+                "references": [{
+                    "id": "ref_01",
+                    "url": product_url,
+                    "source": "asset_refs.product_boards",
+                    "type": "product_board",
+                    "scope": "scene",
+                    "tag": "@product_hero",
+                }],
+                "required_reference_types": ["product_board"],
+                "out_path": os.path.join(directory, "s1.mp4"),
+            }
+            handoff = ve.artifact_contract.build_video_handoff(segment)["fingerprint"]
+            segment["video_handoff_fingerprint"] = handoff
+            manifest_path = os.path.join(directory, "run_manifest.json")
+            results_path = os.path.join(directory, "results.json")
+            review_path = os.path.join(directory, "review.json")
+            manifest = {"client": "acme",
+                        "handoffs": {"video": {"segments": {"s1": handoff}}}}
+            review = {"status": "confirmed", "stage": "video",
+                      "prompts": [{"shot_id": "s1",
+                                   "submission_prompt_zh": "hello",
+                                   "model": "seedance-2.0"}]}
+            with open(manifest_path, "w", encoding="utf-8") as handle:
+                json.dump(manifest, handle)
+            with open(review_path, "w", encoding="utf-8") as handle:
+                json.dump(review, handle)
+            submitted = []
+
+            def fake_submit(_api_key, _segment, _model, _video_type, ref_urls,
+                            _negative_prompt, **_kwargs):
+                submitted.append(ref_urls)
+                return "task-1", "hello"
+
+            with mock.patch.object(ve.key_setup, "load_key", return_value="sk-test"), \
+                 mock.patch.object(ve._rm, "identity_gate", return_value=None), \
+                 mock.patch.object(ve._rm, "generation_gate", return_value=None), \
+                 mock.patch.object(ve, "_pick_video_model", return_value="seedance-2.0"), \
+                 mock.patch.object(ve, "_submit_video", side_effect=fake_submit), \
+                 mock.patch.object(ve.br_client, "get_video",
+                                   return_value={"status": "failed", "error": "remote failed"}), \
+                 mock.patch("time.sleep"):
+                result = ve.render_batch(
+                    [segment], client="acme", verbose=False,
+                    manifest=manifest, manifest_path=manifest_path,
+                    results_out=results_path, prompt_review=review_path,
+                    max_wait=0)
+        self.assertEqual(submitted, [[product_url]])
+        self.assertFalse(result[0]["ok"])
+        self.assertNotIn("UNTRUSTED_VIDEO_REFERENCE", result[0]["error"])
+
+    def test_formal_video_rejects_untyped_remote_references(self):
+        segment = {
+            "id": "s1",
+            "urls": ["https://cdn.example/untracked.png"],
+            "references": [],
+        }
+        with self.assertRaisesRegex(ValueError, "UNTRUSTED_VIDEO_REFERENCE"):
+            ve._validate_references([segment], "acme", manifest={})
 
     def test_locked_refs_keep_storyboard_and_recompute_type(self):
         segments = [{"id": "s1", "storyboard_ref": True,
@@ -96,6 +227,7 @@ class VideoManifestFailClosedTests(unittest.TestCase):
     def test_product_sku_without_images_fails_closed_even_in_draft(self):
         segment = {"id": "s1", "text": "x", "product_sku": "missing"}
         with mock.patch.object(ve.key_setup, "load_key", return_value="sk-test"), \
+             mock.patch.object(ve, "_pick_video_model", return_value="seedance-2.0"), \
              mock.patch.dict(sys.modules, {"product_library": mock.Mock()}):
             sys.modules["product_library"].resolve.return_value = {"hero": None, "refs": []}
             result = ve.render_batch([segment], client="acme", verbose=False, draft=True)

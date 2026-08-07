@@ -14,13 +14,14 @@ import os
 import sys
 import json
 import shutil
+import glob
 import argparse
 import subprocess
 import tempfile
 
 
 def _ffmpeg_bin():
-    """Prefer system ffmpeg; fall back to the pip imageio-ffmpeg static binary."""
+    """Prefer system ffmpeg, then the bundled static-ffmpeg runtime."""
     exe = shutil.which("ffmpeg")
     if exe:
         return exe
@@ -28,7 +29,21 @@ def _ffmpeg_bin():
         import imageio_ffmpeg
         return imageio_ffmpeg.get_ffmpeg_exe()
     except Exception:
-        return None
+        pass
+    try:
+        from static_ffmpeg import run
+        ffmpeg, _ffprobe = run.get_or_fetch_platform_executables_else_raise()
+        return ffmpeg
+    except Exception:
+        # The runtime may be installed read-only and its lock helper can fail;
+        # use an already bundled binary directly before reporting a missing tool.
+        try:
+            import static_ffmpeg
+            root = os.path.dirname(os.path.abspath(static_ffmpeg.__file__))
+            matches = glob.glob(os.path.join(root, "bin", "**", "ffmpeg"), recursive=True)
+            return matches[0] if matches else None
+        except Exception:
+            return None
 
 
 def _ffprobe_bin():
@@ -40,7 +55,13 @@ def _ffprobe_bin():
         _ffmpeg, ffprobe = run.get_or_fetch_platform_executables_else_raise()
         return ffprobe
     except Exception:
-        return None
+        try:
+            import static_ffmpeg
+            root = os.path.dirname(os.path.abspath(static_ffmpeg.__file__))
+            matches = glob.glob(os.path.join(root, "bin", "**", "ffprobe"), recursive=True)
+            return matches[0] if matches else None
+        except Exception:
+            return None
 
 
 def _need_ffmpeg():
@@ -157,7 +178,10 @@ def _concat_with_xfade(normed, out_path, fade_dur=0.4):
     vfilters = []
     afilters = []
     for i in range(len(normed) - 1):
-        offset = durations[i] - fade_dur
+        # xfade's offset is relative to the already chained output. Using only
+        # durations[i] restarts the timeline at every boundary and truncates
+        # long batches (the 5-segment Momax basecut exposed this at 14.67s).
+        offset = sum(durations[:i + 1]) - fade_dur * (i + 1)
         if i == 0:
             v_label = "[v%d]" % i
             a_label = "[a%d]" % i

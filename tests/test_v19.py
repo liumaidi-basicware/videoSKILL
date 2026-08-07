@@ -243,6 +243,9 @@ class TestChainLockedRefsInteraction(unittest.TestCase):
         with patch.object(ve.key_setup, "load_key", return_value="k"), \
              patch.object(ve.br_client, "create_video", side_effect=fake_create_video), \
              patch.object(ve.br_client, "wait_video", return_value="http://x/seg.mp4"), \
+             patch.object(ve, "_model_catalog", return_value={"records": {}, "aliases": {}}), \
+             patch.object(ve.br_client, "list_models", return_value=[]), \
+             patch.object(ve, "_available_models_set", return_value=set()), \
              patch.object(ve.br_client, "to_image_ref", side_effect=lambda u, **kw: u), \
              patch.object(ve.br_client, "download", return_value=None), \
              patch.object(ve, "_extract_last_frame", return_value="/tmp/tail1.png"):
@@ -272,6 +275,9 @@ class TestChainLockedRefsInteraction(unittest.TestCase):
         with patch.object(ve.key_setup, "load_key", return_value="k"), \
              patch.object(ve.br_client, "create_video", side_effect=fake_create_video), \
              patch.object(ve.br_client, "wait_video", return_value="http://x/seg.mp4"), \
+             patch.object(ve, "_model_catalog", return_value={"records": {}, "aliases": {}}), \
+             patch.object(ve.br_client, "list_models", return_value=[]), \
+             patch.object(ve, "_available_models_set", return_value=set()), \
              patch.object(ve.br_client, "to_image_ref", side_effect=lambda u, **kw: u), \
              patch.object(ve.br_client, "download", return_value=None), \
              patch.object(ve, "_extract_last_frame", return_value="/tmp/tail1.png"):
@@ -314,10 +320,18 @@ class TestDigitalHumanEmptyPersonaGuard(unittest.TestCase):
 
     def test_14_create_actor_allow_generic_bypasses(self):
         adir = os.path.join(self.tmp, "client1", "actor2")
+        def fake_download(_url, path, **_kwargs):
+            with open(path, "wb") as handle:
+                handle.write(b"\x89PNG\r\n\x1a\n")
         with patch.object(dh, "_actor_dir", return_value=adir), \
              patch.object(dh.key_setup, "load_key", return_value="k"), \
-             patch.object(dh.br_client, "create_image", return_value=["http://x/p.png"]), \
-             patch.object(dh.br_client, "download", return_value=None):
+             patch.object(dh.br_client, "create_image",
+                          side_effect=AssertionError("legacy sync path used")), \
+             patch.object(dh.br_client, "create_image_generation",
+                          return_value="img_actor"), \
+             patch.object(dh.br_client, "wait_image_generation",
+                          return_value=["https://x/p.png"]), \
+             patch.object(dh.br_client, "download", side_effect=fake_download):
             res = dh.create_actor("client1", "actor2", allow_generic=True)
         self.assertIn("portrait", res)
 
@@ -462,7 +476,12 @@ class TestMatteConfirmedGate(unittest.TestCase):
             f.write(b"\x89PNG\r\n\x1a\n" + b"portrait" * 8)
         stdout, stderr = io.StringIO(), io.StringIO()
         with patch.object(matte.key_setup, "load_key", return_value="k"), \
-             patch.object(matte.br_client, "create_image", return_value=["http://x/fused.png"]), \
+             patch.object(matte.br_client, "create_image",
+                          side_effect=AssertionError("legacy sync path used")), \
+             patch.object(matte.br_client, "create_image_generation",
+                          return_value="img_fused"), \
+             patch.object(matte.br_client, "wait_image_generation",
+                          return_value=["https://x/fused.png"]), \
              redirect_stdout(stdout), redirect_stderr(stderr):
             res = matte.compose_scene(human_abs, "https://cdn.example.com/scene.jpg",
                                       "fuse prompt", client=self.client,

@@ -19,11 +19,11 @@
 >
 > **分镜图片说明：** 分镜图片只有在实际运行 `python3 scripts/storyboard.py --plan output/storyboard_plan.json --out-dir output/storyboard --model gpt-image-2 --json` 后才会生成。成功日志必须看到 `[gpt-image-2] rendering ...` 和 `"ok": true`。默认会写入 `output/storyboard/<run-id>/`，每次会话独立保存，避免覆盖旧的人物板/故事板。如果当前 Agent 没有这些日志，说明还没有调用 gpt-image-2。若宿主界面不显示本地路径图片，请改看返回 JSON 里的 `preview_html` 或 `embedded_md`。
 
-这是一套**客户无关的 AI 营销数字员工通用包**。它可以服务任意品牌/客户：先把客户一句话需求，通过**引导式顾问对话**共创成高质量剧本和逐段分镜；剧本确认后，用 **gpt-image-2** 生成**人物六视图人物板 + 电影级 16:9、4x3、12 格故事板**让客户看图确认；最后再生成**真人数字人短视频 / 动态文字视频 / 产品展示视频**。
+这是一套**客户无关的 AI 营销数字员工通用包**。它可以服务任意品牌/客户：先把客户一句话需求，通过**引导式顾问对话**共创成高质量剧本和逐段分镜；剧本确认后，用 **gpt-image-2** 生成**人物六视图人物板 + 电影级 16:9、格数由剧本分镜数量决定的故事板**让客户看图确认；最后再生成**真人数字人短视频 / 动态文字视频 / 产品展示视频**。
 
-> **12 格故事板转视频说明：** 客户确认 `shot_*.jpg` 后，出视频必须把最终 16:9、4x3、12 格故事板作为主要视觉参考，并开启 `video_engine.py --storyboard-ref` 或在 `segments.json` 写 `"storyboard_ref": true`。硬性要求：按第 1 格到第 12 格顺序生成连续视频，不要把 12 格整图当成一张图动画化；严格保持角色、产品、场景、光线和故事顺序一致；不要添加额外角色，不要改变剧情、服装、道具、产品外观和场景关系。
+> **故事板转视频说明：** 客户确认 `shot_*.jpg` 后，出视频必须开启 `video_engine.py --storyboard-ref` 或在 `segments.json` 写 `"storyboard_ref": true`。默认优先使用 Seedance 的原生故事板能力：提交已确认故事板/contact sheet + 当前镜头确认素材，并通过 `segment/panel_index` 明确只执行当前镜头，同时利用前后镜头关系保证连贯。只有 Seedance 不可用或回落 Kling 时，才自动生成当前镜头的 16:9 单格展开图并提交给 Kling。硬性要求：逐 shot 独立生成；严格保持角色、产品、场景、光线、声音人设、BGM 氛围和故事顺序一致；不要添加额外角色，不要改变剧情、服装、道具、产品外观和场景关系。
 
-> **专业分镜补强说明：** 本包保留自己的 0 基础顾问式引导，不会改成复杂填表；但在脚本定稿后，会参考 `references/professional-storyboard-enrichment.md` 补齐电影级运镜、构图、角色/场景/道具资产提示词、微表情和 BGM/SFX 连续性，再生成 16:9、4x3、12 格故事板。
+> **专业分镜补强说明：** 本包保留自己的 0 基础顾问式引导，不会改成复杂填表；但在脚本定稿后，会参考 `references/professional-storyboard-enrichment.md` 补齐电影级运镜、构图、角色/场景/道具资产提示词、微表情和 BGM/SFX 连续性，再生成 16:9 动态格数故事板。
 
 > 包内自带 `assets/<client>/`、`brand/<client>/`、`actors/<client>/` 只是演示样例，不是业务绑定。正式客户使用时，当前 Agent 会使用 `--client <客户英文代号>` 在 `assets/<client>/`、`brand/<client>/`、`actors/<client>/` 下生成独立资料。
 

@@ -32,9 +32,11 @@ import os
 import sys
 import json
 import shutil
+import glob
 import argparse
 import subprocess
 import tempfile
+import zipfile
 from proc_utils import run_cmd
 import re
 import base64
@@ -109,11 +111,12 @@ def validate_spec(spec):
         if end <= start:
             raise ValueError("HF_SPEC_INVALID: %s.end 必须晚于 start" % label)
         _number(scene.get("size", 84), label + ".size", 1, 2048)
+        _number(scene.get("track_index", 1), label + ".track_index", 0, 1024)
         if scene.get("preset", "fade") not in ALLOWED_PRESETS:
             raise ValueError("HF_SPEC_INVALID: %s.preset 不受支持" % label)
         if scene.get("pos", "center") not in ALLOWED_POSITIONS:
             raise ValueError("HF_SPEC_INVALID: %s.pos 不受支持" % label)
-        for key in ("bottom_px", "top_px", "left_px", "right_px", "max_height_px"):
+        for key in ("bottom_px", "top_px", "left_px", "right_px", "width_px", "max_height_px"):
             if key in scene:
                 _number(scene[key], "%s.%s" % (label, key), 0, 8192)
         for key, value in scene.items():
@@ -148,6 +151,18 @@ def ensure_ffmpeg_on_path():
             return True, "已注入 static-ffmpeg: %s" % bindir
         return False, "static-ffmpeg 解出但 PATH 注入后仍缺 ffprobe"
     except Exception as e:
+        try:
+            import static_ffmpeg
+            root = os.path.dirname(os.path.abspath(static_ffmpeg.__file__))
+            matches = glob.glob(os.path.join(root, "bin", "**", "ffmpeg"), recursive=True)
+            probes = glob.glob(os.path.join(root, "bin", "**", "ffprobe"), recursive=True)
+            if matches and probes and os.path.dirname(matches[0]) == os.path.dirname(probes[0]):
+                bindir = os.path.dirname(matches[0])
+                os.environ["PATH"] = bindir + os.pathsep + os.environ.get("PATH", "")
+                if shutil.which("ffmpeg") and shutil.which("ffprobe"):
+                    return True, "已直接注入 static-ffmpeg 二进制: %s" % bindir
+        except Exception:
+            pass
         return False, ("缺 ffmpeg/ffprobe 且 static-ffmpeg 不可用: %s。"
                        "请 `pip3 install static-ffmpeg`" % e)
 
@@ -159,11 +174,50 @@ def _has_node():
     return bool(shutil.which("node") and shutil.which("npx"))
 
 
+def ensure_browser_path():
+    """Resolve a usable headless Chrome and export it for HyperFrames.
+
+    The project ships the exact browser binary as an offline archive. Merely
+    having that archive is insufficient: HyperFrames needs the executable
+    path during its browser probe. Extraction is cached outside source files
+    when possible and falls back to a temp directory in restricted hosts.
+    """
+    env_keys = ("HYPERFRAMES_BROWSER_PATH", "PRODUCER_HEADLESS_SHELL_PATH")
+    for key in env_keys:
+        value = os.environ.get(key, "").strip()
+        if value and os.path.isfile(value) and os.access(value, os.X_OK):
+            return True, value
+    archive = os.path.join(ROOT, "offline-assets", "chrome",
+                           "chrome-headless-shell-darwin-arm64.zip")
+    if not os.path.isfile(archive):
+        return False, "项目内置 headless Chrome 压缩包不存在"
+    cache_root = os.path.join(ROOT, "output", ".cache", "hyperframes-chrome")
+    binary = os.path.join(cache_root, "chrome-headless-shell-mac-arm64",
+                          "chrome-headless-shell")
+    try:
+        if not (os.path.isfile(binary) and os.access(binary, os.X_OK)):
+            os.makedirs(cache_root, mode=0o700, exist_ok=True)
+            with zipfile.ZipFile(archive) as bundle:
+                names = bundle.namelist()
+                if any(name.startswith("/") or ".." in name.split("/") for name in names):
+                    return False, "内置 Chrome 压缩包路径不安全"
+                bundle.extractall(cache_root)
+            os.chmod(binary, 0o700)
+        os.environ["HYPERFRAMES_BROWSER_PATH"] = binary
+        return True, binary
+    except (OSError, zipfile.BadZipFile) as exc:
+        return False, "内置 Chrome 准备失败: %s" % exc
+
+
 def _npx_command(args):
-    """Use bundled npm prefix offline when present, otherwise normal npx."""
-    bundled = os.path.join(ROOT, "offline-assets", "node-runtime")
-    if os.path.isfile(os.path.join(bundled, "bin", "node")):
-        return ["npx", "--offline", "--prefix", bundled] + args
+    """Use the vendored HyperFrames CLI before consulting npm/npx."""
+    if args and args[0] == "hyperframes":
+        cli = os.path.join(
+            ROOT, "offline-assets", "hyperframes-runtime", "node_modules",
+            "hyperframes", "bin", "hyperframes.mjs")
+        node = shutil.which("node")
+        if node and os.path.isfile(cli):
+            return [node, cli] + args[1:]
     return ["npx", "--yes"] + args
 
 
@@ -189,9 +243,12 @@ def _scene_position_css(sc, W, H, size):
             css.append("top:%dpx" % int(sc["top_px"]))
         # 左右边距默认给个安全内缩；模型给了就用模型的
         css.append("left:%dpx" % int(sc.get("left_px", 40)))
-        css.append("right:%dpx" % int(sc.get("right_px", 40)))
-        # 未显式给 left/right 时，width 交给 left/right 约束；不再钉死整宽
-        css.append("width:auto")
+        if "width_px" in sc:
+            css.append("width:%dpx" % int(sc["width_px"]))
+        else:
+            css.append("right:%dpx" % int(sc.get("right_px", 40)))
+            # 未显式给 left/right 时，width 交给 left/right 约束；不再钉死整宽
+            css.append("width:auto")
         if "max_height_px" in sc:
             css.append("max-height:%dpx" % int(sc["max_height_px"]))
             css.append("overflow:hidden")
@@ -249,27 +306,37 @@ def build_html(spec):
         bg_css = "background:#000;"
 
     nonce = base64.b64encode(secrets.token_bytes(18)).decode("ascii")
-    csp = ("default-src &#39;none&#39;; script-src &#39;self&#39; &#39;nonce-%s&#39;; "
+    # HyperFrames injects a local frame-capture bootstrap script at render time.
+    # A nonce on the authored scripts cannot authorize that injected script, so
+    # this offline page explicitly allows inline scripts while keeping network,
+    # object, frame, and external media sources disabled.
+    csp = ("default-src &#39;none&#39;; script-src &#39;self&#39; &#39;unsafe-inline&#39;; "
            "style-src &#39;unsafe-inline&#39;; connect-src &#39;none&#39;; "
            "img-src &#39;none&#39;; media-src &#39;none&#39;; font-src &#39;self&#39;; "
            "object-src &#39;none&#39;; frame-src &#39;none&#39;; base-uri &#39;none&#39;; "
-           "form-action &#39;none&#39;" % nonce)
+           "form-action &#39;none&#39;")
     L = [
         '<!doctype html>', '<html lang="zh-Hant">', '<head>',
         '<meta charset="UTF-8" />',
          '<meta http-equiv="Content-Security-Policy" content="%s" />' % csp,
         '<meta name="viewport" content="width=%d, height=%d" />' % (W, H),
-         '<script src="gsap.min.js"></script>',
+         '<script nonce="%s" src="gsap.min.js"></script>' % nonce,
         '<style>',
         '@font-face{font-family:"CJK";src:%s;}' % _cjk_font_css(),
         '*{margin:0;padding:0;box-sizing:border-box;}',
         'html,body{width:%dpx;height:%dpx;overflow:hidden;%sfont-family:"CJK",sans-serif;}' % (W, H, bg_css),
         '.cap{position:absolute;color:#fff;'
-        'font-weight:700;letter-spacing:1px;'
+        'font-weight:700;letter-spacing:0;line-height:1.32;'
         'text-shadow:0 0 1px rgba(0,0,0,0.9),0 2px 4px rgba(0,0,0,0.6),0 4px 16px rgba(0,0,0,0.4);'
-        'padding:16px 32px;border-radius:12px;'
-        'background:rgba(8,12,24,0.45);border:1px solid rgba(255,255,255,0.06);'
-        'box-shadow:0 8px 32px rgba(0,0,0,0.3),inset 0 1px 0 rgba(255,255,255,0.05);}',
+        'padding:8px 0;border-radius:0;'
+        'background:transparent;border:0;'
+        'box-shadow:none;}',
+        '.spoken{background:transparent;border:0;box-shadow:none;'
+        'text-shadow:0 2px 4px rgba(0,0,0,0.72),0 4px 18px rgba(0,0,0,0.45);}',
+        '.feature{background:rgba(244,181,68,0.96);color:#111827;font-weight:800;'
+        'padding:10px 20px;border:0;box-shadow:0 8px 24px rgba(0,0,0,0.24);}',
+        '.brand-lockup{background:rgba(8,12,24,0.82);font-weight:800;'
+        'padding:14px 26px;border:1px solid rgba(244,181,68,0.8);}',
         '.accent{color:%s;font-weight:800;}' % primary,
         '</style>', '</head>', '<body>',
         '<div id="root" data-composition-id="main" data-start="0" data-duration="%s" '
@@ -283,9 +350,16 @@ def build_html(spec):
         pos_css = _scene_position_css(sc, W, H, size)
         preset = sc.get("preset", "fade")
         text = _esc(sc["text"]).replace("[[", '<span class="accent">').replace("]]", "</span>")
-        L.append('<div id="%s" class="clip cap" data-start="%s" data-duration="%s" '
-                  'data-track-index="1" style="%sfont-size:%dpx;">%s</div>'
-                  % (sid, start, end - start, pos_css, size, text))
+        track_index = int(sc.get("track_index", 1))
+        default_variant = "feature" if track_index == 2 else "spoken"
+        if "Momax" in sc.get("text", ""):
+            default_variant = "brand-lockup"
+        variant = str(sc.get("variant", default_variant))
+        if variant not in {"spoken", "feature", "brand-lockup"}:
+            variant = "spoken"
+        L.append('<div id="%s" class="clip cap %s" data-start="%s" data-duration="%s" '
+                  'data-track-index="%d" style="%sfont-size:%dpx;">%s</div>'
+                  % (sid, variant, start, end - start, track_index, pos_css, size, text))
         tl.append('tl.from("#%s", %s, %s);' % (sid, _gsap_from(preset), start))
     L += [
         '</div>', '<script nonce="%s">' % nonce,
@@ -317,7 +391,11 @@ def _run_hf(args, cwd, verbose=True):
     cmd = _npx_command(["hyperframes"] + args)
     p = run_cmd(cmd, cwd=cwd, timeout=600, stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT)
-    out = p.stdout.decode("utf-8", "replace")
+    out = p.stdout
+    if isinstance(out, bytes):
+        out = out.decode("utf-8", "replace")
+    else:
+        out = str(out or "")
     if verbose:
         print(out[-1200:], flush=True)
     return p.returncode, out
@@ -346,7 +424,10 @@ def _probe_pix_fmt(path):
              "-show_entries", "stream=pix_fmt,codec_name",
              "-of", "default=nk=1:nw=1", path],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
-        lines = p.stdout.decode("utf-8", "replace").strip().splitlines()
+        output = p.stdout
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", "replace")
+        lines = (output or "").strip().splitlines()
         codec = lines[0] if len(lines) > 0 else None
         pix_fmt = lines[1] if len(lines) > 1 else None
         return codec, pix_fmt
@@ -374,6 +455,9 @@ def render(spec, out_path, work_dir=None, verbose=True, fmt=None, quality="high"
     if not _has_node():
         raise SystemExit("NO_NODE: 未检测到 node/npx，HyperFrames 不可用。"
                          "请先装 Node.js，或改用 text_anim.py(libass) 兜底。")
+    browser_ok, browser_msg = ensure_browser_path()
+    if not browser_ok:
+        raise SystemExit("NO_BROWSER: %s" % browser_msg)
     ok, msg = ensure_ffmpeg_on_path()
     if verbose:
         print("[ffmpeg] " + msg, flush=True)
@@ -439,9 +523,11 @@ def render(spec, out_path, work_dir=None, verbose=True, fmt=None, quality="high"
 
 def doctor():
     print("Node/npx:", "OK" if _has_node() else "缺失（HyperFrames 需要）")
+    browser_ok, browser_msg = ensure_browser_path()
+    print("headless Chrome:", ("OK — " + browser_msg) if browser_ok else ("缺 — " + browser_msg))
     ok, msg = ensure_ffmpeg_on_path()
     print("ffmpeg+ffprobe:", ("OK — " + msg) if ok else ("缺 — " + msg))
-    return 0 if (_has_node() and ok) else 1
+    return 0 if (_has_node() and browser_ok and ok) else 1
 
 
 def main(argv):

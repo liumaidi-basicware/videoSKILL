@@ -104,6 +104,29 @@ class DigitalHumanConfirmationContractTests(unittest.TestCase):
         with open(os.path.join(actor_dir, "meta.json"), encoding="utf-8") as handle:
             self.assertEqual(json.load(handle)["status"], "confirmed")
 
+    def test_generated_actor_uses_async_image_generation(self):
+        actor_dir = os.path.join(self.root, "acme", "host")
+
+        def fake_download(_url, path, **_kwargs):
+            with open(path, "wb") as handle:
+                handle.write(b"\x89PNG\r\n\x1a\n")
+
+        with mock.patch.object(digital_human, "_actor_dir", return_value=actor_dir), \
+             mock.patch.object(digital_human.key_setup, "load_key", return_value="sk-test"), \
+             mock.patch.object(digital_human.br_client, "create_image",
+                               side_effect=AssertionError("legacy sync path used")), \
+             mock.patch.object(digital_human.br_client, "create_image_generation",
+                               return_value="img_actor") as create, \
+             mock.patch.object(digital_human.br_client, "wait_image_generation",
+                               return_value=["https://x/actor.png"]), \
+             mock.patch.object(digital_human.br_client, "download",
+                               side_effect=fake_download):
+            result = digital_human.create_actor(
+                "acme", "host", persona={"profession": "host"})
+        self.assertEqual(result["meta"]["status"], "pending")
+        self.assertEqual(create.call_args.kwargs["model"], "seedream-5.0")
+        self.assertTrue(os.path.isfile(os.path.join(actor_dir, "portrait.png")))
+
 
 if __name__ == "__main__":
     unittest.main()

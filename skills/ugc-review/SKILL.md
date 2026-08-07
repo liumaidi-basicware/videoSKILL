@@ -67,7 +67,7 @@ description: 第一人称测评 UGC 场景：自拍视角、口语化文案、�
 
 ## 故事板约束
 
-- 12 格故事板中**至少 5 格**为自拍角度（handheld、slightly_shaky）
+- 动态格数故事板中至少约 40% 镜头为自拍角度（handheld、slightly_shaky）
 - 产品特写格不少于 3 格（手部接触、细节、使用状态）
 - 不允许出现"品牌 logo 大特写"格——UGC 不做硬广定格
 - `panel_plan` 的 `camera_movement` 优先 `handheld` / `slow_push`

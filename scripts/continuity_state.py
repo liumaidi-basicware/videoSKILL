@@ -7,6 +7,7 @@ import os
 from datetime import datetime
 
 import take_review
+import schema_validate
 from artifact_contract import file_sha256
 
 
@@ -187,6 +188,8 @@ def accept_take(state, review):
 def save_state(state, path):
     state = dict(state)
     state["updated_at"] = _now()
+    # 契约强制：continuity-state schema 运行时校验（fail-closed）
+    schema_validate.enforce(state, "continuity-state", context="continuity_state.save_state")
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as handle:

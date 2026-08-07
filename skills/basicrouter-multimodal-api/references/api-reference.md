@@ -13,7 +13,7 @@ Standard OpenAI body: `{model, messages:[{role,content}], max_tokens, stream, st
 - Multimodal input (per docs): `content` array with `{"type":"image_url","image_url":{"url":...}}` / `{"type":"video_url",...}` + `{"type":"text","text":...}`. ⚠️ VERIFIED 2026-07 the live gateway wants the FLAT variant instead — `{"type":"input_image","image_url":"<url-string>"}` + `{"type":"input_text","text":...}` — and returns text at `data.message.content[].text` (no `choices`). See the main SKILL.md "Multimodal / vision chat" section; trust that over this doc capture.
 - `stream:true` → SSE `data: {...chat.completion.chunk...}` lines; use a POST+SSE client (e.g. @microsoft/fetch-event-source in JS). Response shape is standard OpenAI (`choices[].message.content`, `usage`).
 
-## 5.3 Image — POST /ai/createImage
+## 5.3 Image — POST /v1/image-generations
 Body:
 | field | type | req | note |
 |---|---|---|---|
@@ -24,23 +24,23 @@ Body:
 | ratio | string | no | e.g. "1:1", "16:9" |
 | imageUrls | array<string> | no | reference images (img2img / style transfer) |
 
-Success `data`: `{ "imageUrls": ["https://.../x.png"] }`. Image edit lives at `/ai/editImage` (reference-guided edit / style transfer).
+Success `data`: `{ "taskId": "..." }`. Retrieve with `GET /v1/image-generations/{taskId}` until succeeded; generated image URLs are returned in the task result. Image edit/reference-guided generation uses the same async submit+retrieve pattern with `imageUrls`.
 
-## 5.4 Video (async) — POST /ai/createVideo
+## 5.4 Video (async) — POST /v1/video-generations
 Body:
 | field | type | req | note |
 |---|---|---|---|
 | model | string | yes | video modelName |
 | text | string | yes | prompt, non-empty |
 | videoType | int | yes | 1=t2v · 2=i2v(first) · 3=i2v(first+last) · 4=i2v(reference) · 5=multi-image ref |
-| urls | array<string> | cond | required when videoType != 1 |
+| imageUrls | array<string> | cond | required when videoType != 1 |
 | resolution | string | no | "720p" |
 | ratio | string | no | "16:9","9:16" |
 | duration | long | no | seconds, positive int, ≥ model's videoDurationMin |
 
 Success `data`: `{ "taskId": "...", "status": "submitted|processing|succeeded|failed" }`.
 
-## 5.5 Poll — GET /ai/getVideoByTaskId?taskId=<id>
+## 5.5 Poll — GET /v1/video-generations/{taskId}
 `data`: `{ status, videoUrl (when succeeded), lastFrameUrl (optional), message }`. Poll every 5–10s; max wait 60–300s per model.
 
 ## 5.6 Model list — GET /employee/models?category=text|image|video

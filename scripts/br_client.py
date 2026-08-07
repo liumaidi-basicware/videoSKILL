@@ -3,9 +3,10 @@
 
 Endpoints (base https://api.basicrouter.ai/api):
   POST /v1/chat/completions        chat / script / creative (OpenAI-compatible)
-  POST /ai/createImage             image gen / img2img -> data.imageUrls
-  POST /ai/createVideo             ASYNC video -> data.taskId
-  GET  /ai/getVideoByTaskId        poll -> data.{status,videoUrl,lastFrameUrl}
+  POST /v1/image-generations       ASYNC image -> data.taskId
+  GET  /v1/image-generations/{id}  poll -> data.images
+  POST /v1/video-generations       ASYNC video -> data.taskId
+  GET  /v1/video-generations/{id}  poll -> data.{status,videoUrl,lastFrameUrl}
   GET  /employee/models            model list (no auth), category=video|image|text
 Envelope: {code,message,data}; code 200 ok, -1 insufficient credit.
 """
@@ -616,14 +617,15 @@ def list_image_models(api_key=None):
 
 
 def _legacy_video_model_name(model):
-    """Translate catalog IDs to the name accepted by legacy createVideo.
+    """Translate catalog IDs to the provider-facing video submission name.
 
-    The live catalog exposes canonical model IDs while the legacy endpoint has
-    historically accepted display/model names (for example ``kling-v3-omni-video``
-    instead of ``kling-v3-omni``). Prefer the live catalog's modelName/alias and
-    retain only a narrow offline fallback for known gateway pairs.
+    The live catalog exposes canonical model IDs while the video generation
+    endpoint accepts provider-facing model names (for example ``seedance-2.0``
+    instead of ``dreamina-seedance-2-0-260128``). Prefer the live catalog's
+    modelName/alias and retain only a narrow offline fallback for known gateway
+    pairs.
     """
-    if API_MODE != "legacy" or not model:
+    if not model:
         return model
     try:
         for item in list_video_models(None):
@@ -694,6 +696,18 @@ def _legacy_video_model_candidates(model):
     fallback = _legacy_video_model_name(requested)
     if fallback not in candidates:
         candidates.append(fallback)
+    # Keep the Kling legacy pair available in both directions. Live catalogs
+    # have alternated between ``kling-v3-omni`` and ``kling-v3-omni-video``
+    # as the accepted submission name, so retry the sibling only after a
+    # model-not-found response. This stays fail-closed for other error types.
+    if requested == "kling-v3-omni-video":
+        sibling = "kling-v3-omni"
+    elif requested == "kling-v3-omni":
+        sibling = "kling-v3-omni-video"
+    else:
+        sibling = None
+    if sibling and sibling not in candidates:
+        candidates.append(sibling)
     return candidates
 
 
@@ -712,77 +726,45 @@ def create_video(api_key, text, model="kling-v3-omni-video", video_type=1,
                  urls=None, resolution="1080p", ratio="9:16", duration=5,
                  negative_prompt=None, seed=None, extra=None, extend_video_url=None,
                  request_id=None):
-    """POST /ai/createVideo (async) -> taskId.
+    """POST /v1/video-generations (async) -> taskId.
 
     高级参数（实测网关接受，提升画质/一致性）：
       resolution="1080p"     默认拉到 1080p（实测真出 1920x1080，画质翻倍，观感更高级）
-      negative_prompt=...    负向约束（去畸形/糊/多手指），传入即加进 body
-      seed=<int>             固定随机种子，多段用同一 seed 提升人物/风格一致性
+      negative_prompt=...    负向约束（仅旧兼容入口使用；当前 v1 文档未声明该字段）
+      seed=<int>             固定随机种子（仅旧兼容入口使用；当前 v1 文档未声明该字段）
       extra={...}            其它想透传的字段（前向兼容新参数）
     未传的高级参数不进 body，保持与旧行为一致。
     """
-    if API_MODE != "legacy":
-        spec = next((item for item in list_video_models(api_key)
-                     if isinstance(item, dict) and
-                     (item.get("id") or item.get("modelId") or item.get("modelName")) == model), None)
-        if spec is None:
-            raise BRError("VIDEO_MODEL_NOT_FOUND: %s" % model)
-        allowed = spec.get("allowedVideoTypes") or spec.get("allowVideoType") or []
-        if isinstance(allowed, str):
-            try:
-                allowed = json.loads(allowed)
-            except json.JSONDecodeError:
-                allowed = [int(x) for x in re.findall(r"\d+", allowed)]
-        allowed = {int(x) for x in allowed}
-        if int(video_type) not in allowed:
-            raise BRError("VIDEO_TYPE_UNSUPPORTED: model=%s videoType=%s allowed=%s" %
-                          (model, video_type, sorted(allowed)))
-        min_duration = spec.get("videoDurationMin")
-        max_duration = spec.get("videoDurationMax")
-        if min_duration is not None and duration < float(min_duration):
-            raise BRError("VIDEO_DURATION_TOO_SHORT: minimum=%s" % min_duration)
-        if max_duration is not None and duration > float(max_duration):
-            raise BRError("VIDEO_DURATION_TOO_LONG: maximum=%s" % max_duration)
     request_id = request_id or uuid.uuid4().hex
-    path = "/ai/createVideo" if API_MODE == "legacy" else "/v1/video-generations"
-    candidates = _legacy_video_model_candidates(model) if API_MODE == "legacy" else [model]
+    candidates = _legacy_video_model_candidates(model)
     last_error = None
-    for api_model in candidates:
-        body = {"model": api_model, "text": text, "videoType": video_type,
-                ("imageUrls" if API_MODE != "legacy" else "urls"): urls or [], "resolution": resolution,
+    for idx, submit_model in enumerate(candidates):
+        body = {"model": submit_model, "text": text, "videoType": video_type,
+                "imageUrls": urls or [], "resolution": resolution,
                 "ratio": ratio, "duration": duration}
-        if negative_prompt and API_MODE == "legacy":
-            body["negativePrompt"] = negative_prompt
-        if seed is not None and API_MODE == "legacy":
-            body["seed"] = seed
         if extend_video_url:
-            if API_MODE == "legacy":
-                body["extend"] = True
-                body["videoUrl"] = extend_video_url
-            else:
-                body["videoUrls"] = [extend_video_url]
+            body["videoUrls"] = [extend_video_url]
         if extra:
             body.update(extra)
+        submit_request_id = request_id if idx == 0 else "%s:%d" % (request_id, idx)
         try:
-            data = _unwrap(_request("POST", path, api_key=api_key, body=body,
-                                    timeout=60, idempotency_key=request_id))
-            break
+            data = _unwrap(_request(
+                "POST", "/v1/video-generations", api_key=api_key, body=body,
+                timeout=60, idempotency_key=submit_request_id))
+            if not isinstance(data, dict) or not data.get("taskId"):
+                raise BRError("createVideo returned no taskId: %s" % json.dumps(data)[:300])
+            return data["taskId"]
         except BRError as error:
-            last_error = error
-            if API_MODE != "legacy" or not is_video_model_not_found(error):
+            if not is_video_model_not_found(error) or idx >= len(candidates) - 1:
                 raise
-    else:
+            last_error = error
+    if last_error:
         raise last_error
-    if not isinstance(data, dict) or not data.get("taskId"):
-        raise BRError("createVideo returned no taskId: %s" % json.dumps(data)[:300])
-    return data["taskId"]
+    raise BRError("createVideo returned no taskId: %s" % model)
 
 
 def get_video(api_key, task_id):
-    """GET documented video task status endpoint."""
-    if API_MODE == "legacy":
-        return _unwrap(_request("GET", "/ai/getVideoByTaskId", api_key=api_key,
-                                query={"taskId": task_id}, timeout=30))
+    """GET /v1/video-generations/{taskId} documented video task status endpoint."""
     data = _unwrap(_request("GET", "/v1/video-generations/%s" %
                            urllib.parse.quote(str(task_id), safe=""),
                            api_key=api_key, timeout=30))
@@ -877,7 +859,8 @@ def _normalize_ip(value):
 def _configured_proxy_peers():
     """Return explicitly configured proxy peers allowed for HTTPS downloads."""
     peers = set()
-    for key in ("HTTPS_PROXY", "https_proxy"):
+    for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+                "ALL_PROXY", "all_proxy"):
         value = os.environ.get(key)
         if not value:
             continue
@@ -1049,10 +1032,11 @@ _HOST_IMAGE_CACHE: dict = {}
 def host_image(api_key, path, timeout=600):
     """Upload a local image and return a hosted https URL.
 
-    Implementation: send the local file as a base64 data URL to createImage
-    (identity/clean-up edit); the platform returns a hosted URL we can reuse for
-    createVideo (whose endpoint rejects very large data-URL bodies). This is the
-    'no external image host needed' path — the platform itself hosts it.
+    Implementation: send the local file as a base64 data URL to the documented
+    async image-generation endpoint, then retrieve the generated image URL. The
+    platform returns a hosted URL we can reuse for createVideo (whose endpoint
+    rejects very large data-URL bodies). This is the 'no external image host
+    needed' path — the platform itself hosts it.
 
     进程级缓存：同一路径的相同内容和凭据只上传一次，防止 batch/chain 里同一张
     confirmed 参考图被重绘 N 次（浪费 Credit + 破坏一致性）。
@@ -1072,18 +1056,19 @@ def host_image(api_key, path, timeout=600):
     data_url = "data:%s;base64,%s" % (mime, base64.b64encode(image_bytes).decode())
     request_id = "host-" + hashlib.sha256(
         (content_sha + key_sha).encode("ascii")).hexdigest()
+    task_id = create_image_generation(
+        api_key, "keep the image unchanged, clean output",
+        model="kling-v3-omni-image", count=1,
+        resolution="2k", ratio="9:16", image_urls=[data_url],
+        request_id=request_id)
     try:
-        urls = create_image(api_key, "keep the image unchanged, clean output",
-                            model="kling-v3-omni-image", count=1,
-                            resolution="2k", ratio="9:16", image_urls=[data_url],
-                            request_id=request_id, timeout=timeout)
+        urls = wait_image_generation(api_key, task_id, interval=5, max_wait=timeout)
     except BRError as exc:
         if "timeout" not in str(exc).lower() and "超时" not in str(exc):
             raise
-        urls = create_image(api_key, "keep the image unchanged, clean output",
-                            model="kling-v3-omni-image", count=1,
-                            resolution="2k", ratio="9:16", image_urls=[data_url],
-                            request_id=request_id, timeout=timeout)
+        # Retrieval timed out after task submission. Re-poll the same task ID
+        # rather than submitting a second billable hosting request.
+        urls = wait_image_generation(api_key, task_id, interval=5, max_wait=timeout)
     if not urls:
         raise BRError("host_image: platform returned no URL")
     result = urls[0]
@@ -1095,7 +1080,9 @@ def to_image_ref(path_or_url, api_key=None, prefer_hosted=False, host_timeout=60
     """Normalize an image reference for the API.
 
     - http(s)/data URL: passthrough.
-    - local file + prefer_hosted (video use): upload via host_image -> https URL.
+    - local file + prefer_hosted: legacy pseudo-hosting via image generation.
+      Do not use this for /v1/video-generations; video imageUrls must be the
+      HTTP(S) URLs returned by the original image retrieve result.
     - local file otherwise (image use): inline base64 data URL.
     """
     if not path_or_url:

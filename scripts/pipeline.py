@@ -87,9 +87,16 @@ def _try_cost_line(manifest):
 
 def pipeline_status(manifest):
     """Return one stable, customer-readable next action with absolute previews."""
+    optional = {
+        "product_board": "requires_product_board",
+        "product_usage": "requires_product_usage",
+        "styleframe": "requires_styleframe",
+        "audio": "requires_audio",
+        "test_segment": "requires_test_segment",
+        "shotcraft_packaging": "requires_shotcraft_packaging",
+    }
     required = [stage for stage in rm.STAGES
-                if (stage != "product_board" or manifest.get("requires_product_board")) and
-                (stage != "product_usage" or manifest.get("requires_product_usage"))]
+                if stage not in optional or manifest.get(optional[stage])]
     current = next((stage for stage in required if not rm.approval_is_current(manifest, stage)), "delivery")
     generation = (manifest.get("generation") or {}).get(current) or {}
     pending = generation.get("status") == "pending_approval"
@@ -157,6 +164,17 @@ def _delivery_snapshot(manifest):
     if derive_gen.get("status") not in (None, "skipped"):
         if not rm.approval_is_current(manifest, "derive"):
             raise ValueError("DELIVERY_DERIVE_APPROVAL_REQUIRED_OR_STALE")
+        details = derive_gen.get("derived_details") or []
+        if not details:
+            raise ValueError("DELIVERY_DERIVE_OUTPUTS_REQUIRED")
+        for item in details:
+            output = item.get("path")
+            expected_sha = item.get("sha256")
+            qc = item.get("media_qc") or {}
+            current = rm.file_record(output) if output else None
+            if (not current or not current.get("exists") or current.get("sha256") != expected_sha or
+                    not qc.get("passed")):
+                raise ValueError("DELIVERY_DERIVE_QC_REQUIRED_OR_STALE")
     if not rm.approval_is_current(manifest, "video"):
         raise ValueError("DELIVERY_VIDEO_APPROVAL_REQUIRED_OR_STALE")
     if not rm.approval_is_current(manifest, "captions"):
@@ -170,6 +188,13 @@ def _delivery_snapshot(manifest):
             qc_file.get("path") != final_records[0].get("path") or
             qc_file.get("sha256") != final_records[0].get("sha256")):
         raise ValueError("DELIVERY_FINAL_FORMAL_QC_REQUIRED_OR_STALE")
+    disclosure = manifest.get("disclosure") or {}
+    if disclosure.get("applied"):
+        alpha_path = disclosure.get("alpha_path")
+        alpha_sha = disclosure.get("alpha_sha256")
+        alpha_record = rm.file_record(alpha_path) if alpha_path else None
+        if not alpha_record or alpha_record.get("sha256") != alpha_sha:
+            raise ValueError("DELIVERY_DISCLOSURE_ARTIFACT_STALE")
 
     caption_ref = manifest.get("caption_artifact") or {}
     caption_path = caption_ref.get("path")
@@ -263,6 +288,15 @@ def create_delivery(manifest, path):
         **snapshot,
     }
     _atomic_json(path, delivery)
+    # This is advisory metadata for the customer-facing host, not a delivery
+    # gate: performance data is collected only after a platform publishes it.
+    try:
+        import performance_feedback
+        delivery["performance_feedback_reminder"] = performance_feedback.generate_delivery_reminder(
+            manifest.get("client"), manifest.get("run_id"))
+        _atomic_json(path, delivery)
+    except (ImportError, OSError, ValueError, json.JSONDecodeError):
+        pass
     return delivery
 
 

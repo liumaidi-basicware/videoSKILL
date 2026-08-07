@@ -34,6 +34,7 @@ import argparse
 import shutil
 import subprocess
 import hashlib
+import glob
 from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -42,8 +43,11 @@ from aspect_ratio import output_ratio  # noqa: E402
 import run_manifest as rm  # noqa: E402
 import take_review  # noqa: E402
 from video_segmentation import partition_shots, SEEDANCE_MAX_SECONDS, max_seconds_for_model
-from artifact_contract import build_video_handoff
+from artifact_contract import build_video_handoff, storyboard_image_input_tags
+import schema_validate  # noqa: E402
 import subtitle_asr  # noqa: E402
+import storyboard_enhancements  # noqa: E402
+import panel_expansion  # noqa: E402
 
 # aspect_ratio → (ratio_str, default resolution)。竖屏优先（短视频主场景）。
 _RATIO_MAP = {
@@ -63,6 +67,20 @@ def _load_storyboard_result(storyboard_dir):
     return path, result if isinstance(result, dict) else None
 
 
+def _resolve_current_storyboard_dir(storyboard_dir, run_id, plan, storyboard_module):
+    """Follow storyboard.py's run pointer so a logical run_id cannot read a stale revision."""
+    if not storyboard_dir or not run_id:
+        return os.path.abspath(storyboard_dir) if storyboard_dir else None
+    requested = os.path.abspath(storyboard_dir)
+    base = os.path.dirname(requested)
+    current = storyboard_module.resolve_current_storyboard_dir(base, run_id, plan)
+    if current and os.path.abspath(current) != requested:
+        print("[split] storyboard_dir redirected to current revision: %s" %
+              os.path.abspath(current), flush=True)
+        return os.path.abspath(current)
+    return requested
+
+
 def _storyboard_shot_map(result):
     """Build the only supported shot-image map from explicit result shot IDs.
     Keys are normalized via _normalize_shot_id for flexible matching."""
@@ -71,10 +89,50 @@ def _storyboard_shot_map(result):
         raw_sid = str((item.get("shot") or {}).get("id") or "").strip()
         sid = _normalize_shot_id(raw_sid) or raw_sid
         path = item.get("abspath") or item.get("path")
+        video_ref = _result_item_video_ref(item)
         if not sid or not path or sid in mapping:
             raise ValueError("INVALID_STORYBOARD_RESULT: shot id/path 缺失或重复")
-        mapping[sid] = os.path.abspath(path)
+        mapping[sid] = {
+            "path": os.path.abspath(path),
+            "url": video_ref,
+        }
     return mapping
+
+
+def _is_remote_url(value):
+    return isinstance(value, str) and value.startswith(("http://", "https://"))
+
+
+def _result_item_video_ref(item, storyboard_dir=None, result_key=None):
+    """Return the BasicRouter media URL for video imageUrls, if preserved.
+
+    Local paths are useful for display, hashing and manual QA, but BasicRouter
+    /v1/video-generations requires imageUrls to be HTTP(S) media URLs. These
+    URLs should come from the original /v1/image-generations/{taskId} retrieve
+    response, never from a redraw-as-hosting step.
+    """
+    if not isinstance(item, dict):
+        return None
+    for key in ("url", "result_url", "remote_url", "download_url", "imageUrl"):
+        value = item.get(key)
+        if _is_remote_url(value):
+            return value
+    values = item.get("imageUrls")
+    if isinstance(values, list):
+        for value in values:
+            if _is_remote_url(value):
+                return value
+    if storyboard_dir and result_key == "product_board":
+        state_path = os.path.join(storyboard_dir, "product_board_state.json")
+        try:
+            with open(state_path, encoding="utf-8") as handle:
+                state = json.load(handle)
+            value = state.get("result_url") or state.get("url")
+            if _is_remote_url(value):
+                return value
+        except (OSError, ValueError, TypeError):
+            pass
+    return None
 
 
 def _normalize_shot_id(raw_id):
@@ -122,6 +180,55 @@ def _storyboard_result_fingerprint(storyboard_dir):
     """Read the generated storyboard revision identity, when available."""
     if not storyboard_dir:
         return None
+
+
+def _stale_storyboard_shot_ids(result, shots, storyboard):
+    """Return only storyboard panels whose approved visual contract is stale.
+
+    A pre-panel-fingerprint result remains fail-closed on a plan revision.  New
+    results can safely retain approvals for unchanged panels because both the
+    panel fingerprint and the approved image bytes must still match.
+    """
+    result_by_id = {
+        str((item.get("shot") or {}).get("id")): item
+        for item in (result or {}).get("shots") or []
+    }
+    stale = set()
+    for shot in shots or []:
+        sid = str(shot.get("id") or "")
+        item = result_by_id.get(sid)
+        result_shot = (item or {}).get("shot") or {}
+        path = (item or {}).get("abspath") or (item or {}).get("path")
+        if (not item or not item.get("shot_fingerprint") or
+                not _storyboard_result_shot_matches_source(result_shot, shot) or
+                not path or not os.path.isfile(path)):
+            stale.add(sid)
+    return stale
+
+
+_AUTHOR_VISUAL_SHOT_KEYS = (
+    "id", "panel_index", "visual", "characters",
+    "scene", "props", "ref_tags", "shot_size", "camera_movement",
+    "angle_offset", "composition", "lighting", "character_action",
+    "micro_expression", "scene_prompt", "prop_prompts", "asset_refs",
+)
+
+
+def _storyboard_result_shot_matches_source(result_shot, source_shot):
+    """Compare only authored visual fields.
+
+    storyboard.py injects runtime-only fields such as approved_prompt_zh,
+    panel_plan, references, and generated reference metadata into the result
+    shot. Those fields are part of the rendered proof, but they are not present
+    in the original storyboard_plan.json used by the video splitter. Treating
+    them as source edits makes a confirmed storyboard look stale immediately.
+    """
+    if not isinstance(result_shot, dict) or not isinstance(source_shot, dict):
+        return False
+    for key in _AUTHOR_VISUAL_SHOT_KEYS:
+        if result_shot.get(key) != source_shot.get(key):
+            return False
+    return True
     path = os.path.join(storyboard_dir, "storyboard_result.json")
     try:
         with open(path, encoding="utf-8") as handle:
@@ -166,62 +273,131 @@ def _collect_anchor_urls(shot, plan_refs, shot_image, bw_storyboard=True):
 _REFERENCE_META = {
     "product_usage_images": (
         "product_usage_identity", "已确认产品使用细节图", "锁定人物与产品操作关系",
-        "继承人物身份、产品外观、手部接触点和真实操作关系，不继承背景文字"),
+        "继承人物身份、产品外观、手部接触点和真实操作关系，不继承背景文字", "@usage"),
     "cast_boards": (
         "character_board", "已确认人物六视图", "锁定人物身份与全身一致性",
-        "继承脸部、发型、服装、配饰和身体比例，不继承板式布局"),
+        "继承脸部、发型、服装、配饰和身体比例，不继承板式布局", "@host"),
     "product_boards": (
         "product_board", "已确认产品九宫格板", "锁定产品多角度外观",
-        "继承产品结构、材质、颜色、比例和原生标识，不继承板式布局"),
+        "继承产品结构、材质、颜色、比例和原生标识，不继承板式布局", "@product"),
     "digital_human_portraits": (
         "character_identity", "人物身份参考", "锁定人物身份",
-        "只继承脸部、发型、服装、配饰和身体比例，不继承背景、姿势或构图"),
+        "只继承脸部、发型、服装、配饰和身体比例，不继承背景、姿势或构图", "@host"),
     "product_images": (
         "product_identity", "产品外观参考", "锁定产品身份",
-        "只继承结构、材质、颜色、比例和原生标识，不继承背景或构图"),
+        "只继承结构、材质、颜色、比例和原生标识，不继承背景或构图", "@product"),
     "scene_images": (
         "scene_environment", "场景环境参考", "锁定空间与灯光",
-        "只继承环境布局、材质和光线，不复制图中偶然出现的人物或文字"),
+        "只继承环境布局、材质和光线，不复制图中偶然出现的人物或文字", "@scene"),
 }
 
 
-def _required_reference_types(_refs=None, has_human=False, has_product=False):
+def _next_tag(base_tag, tag_counts):
+    """Allocate a stable, unique @tag within one shot's reference set.
+
+    第一张用基础 tag（如 @host），同类型第二张起加数字后缀（@host2、@host3），
+    保证同一 run 内每张参考图都有唯一、可在 prompt 里内联引用的标识符。
+    """
+    count = tag_counts.get(base_tag, 0) + 1
+    tag_counts[base_tag] = count
+    return base_tag if count == 1 else "%s%d" % (base_tag, count)
+
+
+def _required_reference_types(_refs=None, has_human=False, has_product=False,
+                              usage_required=False):
     """Return semantic reference types that cannot be silently dropped."""
     required = {"storyboard_composition"}
     if has_human:
         required.add("character_board")
     if has_product:
         required.add("product_board")
-    if has_human and has_product:
+    if usage_required:
         required.add("product_usage_identity")
     return required
 
 
 def _collect_typed_references(shot, plan_refs, shot_image, bw_storyboard=True):
-    """Return role-bound references while preserving the legacy URL order."""
+    """Return role-bound references while preserving the legacy URL order.
+
+    每条 reference 分配唯一 @tag（如 @host、@product、@usage、@scene），供故事板 prompt 和
+    视频提交 prompt 逐格/逐镜头内联引用，取代过去"整段动作描述 + 参考图清单"两段分离的写法。
+    """
     shot_refs = shot.get("asset_refs") or {}
     refs = dict(plan_refs or {})
     refs.update(shot_refs)
     by_url = {}
     color = []
-    for key in ("product_usage_images", "cast_boards", "product_boards",
-                "digital_human_portraits", "product_images", "scene_images"):
-        ref_type, label, role, intent = _REFERENCE_META[key]
-        for url in refs.get(key) or []:
-            if not url or url in by_url:
+    tag_counts = {}
+    wanted_tags = list(shot.get("ref_tags") or [])
+    if isinstance(wanted_tags, str):
+        wanted_tags = [wanted_tags]
+    registry_by_tag = {
+        item.get("tag"): item for item in (refs.get("reference_registry") or [])
+        if isinstance(item, dict) and item.get("tag") and item.get("url")
+    }
+    try:
+        import storyboard as _storyboard
+        usage_action = _storyboard._shot_needs_usage_reference(shot)
+    except Exception:
+        usage_action = False
+    explicit_usage = "@usage" in wanted_tags
+    if "@usage" in registry_by_tag and not explicit_usage and usage_action:
+        wanted_tags.insert(0, "@usage")
+    if registry_by_tag:
+        tag_refs = [{"tag": tag, "url": registry_by_tag[tag].get("url"),
+                     "type": registry_by_tag[tag].get("type")}
+                    for tag in wanted_tags if tag in registry_by_tag]
+        budget = storyboard_image_input_tags({
+            "ref_tags": wanted_tags,
+            "references": tag_refs,
+        })
+        wanted_tags = [tag for tag in wanted_tags if tag in set(budget["selected"])]
+    for tag in wanted_tags:
+        item = registry_by_tag.get(tag)
+        if not item or item.get("url") in by_url:
+            continue
+        ref_type = item.get("type") or "generic_visual"
+        if ref_type == "product_usage_identity":
+            label, role, intent = _REFERENCE_META["product_usage_images"][1:4]
+        elif ref_type in ("character_identity", "character_board"):
+            label, role, intent = _REFERENCE_META["digital_human_portraits"][1:4]
+        elif ref_type == "product_board":
+            label, role, intent = _REFERENCE_META["product_boards"][1:4]
+        elif ref_type == "product_identity":
+            label, role, intent = _REFERENCE_META["product_images"][1:4]
+        elif ref_type == "scene_environment":
+            label, role, intent = _REFERENCE_META["scene_images"][1:4]
+        else:
+            label, role, intent = "已确认参考素材", "锁定画面语义", "继承已确认素材的可见身份与关系"
+        ref = {"id": "ref_%02d" % (len(by_url) + 1), "url": item["url"],
+               "type": ref_type, "scope": "scene", "label": item.get("label") or label,
+               "role": item.get("role") or role, "intent": item.get("intent") or intent,
+               "source": item.get("source") or "storyboard.reference_registry",
+               "tag": tag}
+        by_url[ref["url"]] = ref
+        color.append(ref)
+    if not color:
+        for key in ("product_usage_images", "cast_boards", "product_boards",
+                    "digital_human_portraits", "product_images", "scene_images"):
+            if key == "product_usage_images" and not (usage_action or explicit_usage):
                 continue
-            item = {"id": "ref_%02d" % (len(by_url) + 1), "url": url,
-                    "type": ref_type, "scope": "scene", "label": label,
-                    "role": role, "intent": intent, "source": "asset_refs.%s" % key}
-            by_url[url] = item
-            color.append(item)
+            ref_type, label, role, intent, base_tag = _REFERENCE_META[key]
+            for url in refs.get(key) or []:
+                if not url or url in by_url:
+                    continue
+                item = {"id": "ref_%02d" % (len(by_url) + 1), "url": url,
+                        "type": ref_type, "scope": "scene", "label": label,
+                        "role": role, "intent": intent, "source": "asset_refs.%s" % key,
+                        "tag": _next_tag(base_tag, tag_counts)}
+                by_url[url] = item
+                color.append(item)
     storyboard = None
     if shot_image:
         storyboard = {"id": "ref_%02d" % (len(by_url) + 1), "url": shot_image,
                       "type": "storyboard_composition", "scope": "beat",
                       "label": "分镜锚定图", "role": "构图与动作顺序参考",
                       "intent": "只继承构图、机位和动作顺序，不继承黑白素描媒介",
-                      "source": "storyboard"}
+                      "source": "storyboard", "tag": _next_tag("@storyboard", tag_counts)}
     ordered = color + ([storyboard] if storyboard else []) if bw_storyboard else \
         ([storyboard] if storyboard else []) + color
     kept = ordered[:4]
@@ -229,13 +405,82 @@ def _collect_typed_references(shot, plan_refs, shot_image, bw_storyboard=True):
         item["id"] = "ref_%02d" % index
         item["index"] = index
     dropped = [dict(item, reason="gateway_reference_limit") for item in ordered[4:]]
+    # 契约强制：每条 typed reference 必须通过 reference-contract（fail-closed）
+    for item in kept:
+        schema_validate.enforce(item, "reference-contract",
+                                context="script_splitter._collect_typed_references")
     return kept, dropped
+
+
+def _remap_reference_registry_to_confirmed_boards(reference_registry, confirmed_stage_paths):
+    """Point storyboard tags at confirmed boards before video handoff.
+
+    The storyboard registry is authored early from raw product/character inputs.
+    Once customers confirm generated boards, video must inherit those confirmed
+    boards rather than silently falling back to raw identity images under the
+    same @tag.
+    """
+    registry = []
+    for item in reference_registry or []:
+        if not isinstance(item, dict):
+            continue
+        ref = dict(item)
+        ref_type = ref.get("type")
+        if (ref_type in ("character_identity", "character_board") and
+                confirmed_stage_paths.get("cast_boards")):
+            _ref_type, label, role, intent, _tag = _REFERENCE_META["cast_boards"]
+            ref.update({"url": confirmed_stage_paths["cast_boards"],
+                        "type": "character_board",
+                        "source": "asset_refs.cast_boards",
+                        "label": label, "role": role, "intent": intent})
+        if (ref_type in ("product_identity", "product_board") and
+                confirmed_stage_paths.get("product_boards")):
+            _ref_type, label, role, intent, _tag = _REFERENCE_META["product_boards"]
+            ref.update({"url": confirmed_stage_paths["product_boards"],
+                        "type": "product_board",
+                        "source": "asset_refs.product_boards",
+                        "label": label, "role": role, "intent": intent})
+        if (ref_type == "product_usage_identity" and
+                confirmed_stage_paths.get("product_usage_images")):
+            _ref_type, label, role, intent, _tag = _REFERENCE_META["product_usage_images"]
+            ref.update({"url": confirmed_stage_paths["product_usage_images"],
+                        "type": "product_usage_identity",
+                        "source": "asset_refs.product_usage_images",
+                        "label": label, "role": role, "intent": intent})
+        registry.append(ref)
+    return registry
+
+
+def _confirmed_generated_board_current(storyboard_dir, approval_kind, item,
+                                       source_fingerprint, storyboard_module):
+    if not isinstance(item, dict) or item.get("status") != "confirmed":
+        return False
+    if not source_fingerprint:
+        return False
+    if storyboard_module._approval_current(storyboard_dir, approval_kind, source_fingerprint):
+        return True
+    path = item.get("abspath") or item.get("path")
+    expected_sha = item.get("board_sha256") or item.get("sha256")
+    if not path or not expected_sha or not os.path.isfile(path):
+        return False
+    with open(path, "rb") as handle:
+        actual_sha = hashlib.sha256(handle.read()).hexdigest()
+    if actual_sha != expected_sha:
+        return False
+    return bool(_result_item_video_ref(
+        item, storyboard_dir=storyboard_dir, result_key={
+            "usage": "product_usage_image",
+            "cast": "cast_board",
+            "product": "product_board",
+        }.get(approval_kind)))
 
 
 def _legacy_reference_roles(references):
     return [{"label": ref["label"], "role": ref["role"], "intent": ref["intent"],
              "type": ref["type"], "scope": ref["scope"], "ref_id": ref["id"],
+             "tag": ref.get("tag"),
              "ref_index": index}
+
             for index, ref in enumerate(references or [], 1)]
 
 
@@ -245,8 +490,19 @@ def _build_clip_contract(plan, shot, references, ratio, style, duration):
     for key in ("already_happened", "this_clip_only", "reserved_for_later", "endpoint"):
         if key in shot and key not in scope:
             scope[key] = shot[key]
-    beats = shot.get("timeline") or []
-    return {
+    # A compiled segment is one authored storyboard panel, not a request for a
+    # model to infer several beats from a contact sheet.
+    ref_tags = shot.get("ref_tags") or [ref.get("tag") for ref in references
+                                         if ref.get("tag") and ref.get("type") != "storyboard_composition"]
+    if isinstance(ref_tags, str):
+        ref_tags = [ref_tags]
+    beats = [{
+        "panel_index": int(shot.get("panel_index") or 1), "ref_tags": ref_tags,
+        "start": 0, "end": duration,
+        "action": shot.get("character_action") or shot.get("action") or shot.get("visual"),
+        "camera": shot.get("camera_movement") or shot.get("camera"),
+    }]
+    contract = {
         "version": 1,
         "scope": scope,
         "scopes": {
@@ -265,6 +521,34 @@ def _build_clip_contract(plan, shot, references, ratio, style, duration):
             "beats": beats,
         },
     }
+    # 契约强制：clip-contract 运行时校验（fail-closed）
+    schema_validate.enforce(contract, "clip-contract",
+                            context="script_splitter._build_clip_contract")
+    return contract
+
+
+def _reference_bindings(shot, references, has_human, has_product):
+    """Add shot-local semantic roles without changing stable identity tags."""
+    bindings = []
+    for ref in references:
+        tag = ref.get("tag")
+        if not tag or ref.get("type") == "storyboard_composition":
+            continue
+        ref_type = ref.get("type")
+        if ref_type == "product_usage_identity":
+            role = "interaction_anchor"
+        elif ref_type in ("character_board", "character_identity"):
+            role = "active_operator" if has_human and has_product else "primary_subject"
+        elif ref_type in ("product_board", "product_identity"):
+            role = "product_focus"
+        elif ref_type == "scene_environment":
+            role = "environment_anchor"
+        else:
+            role = "identity_anchor"
+        bindings.append({"tag": tag, "role": role, "must_be_visible": role != "environment_anchor",
+                         "visibility_priority": "high" if role in ("primary_subject", "product_focus", "interaction_anchor") else "normal",
+                         "allowed_transformations": "identity_only" if role != "environment_anchor" else "layout_lighting_only"})
+    return bindings
 
 
 def _build_audio_contract(plan, shot, dialogue):
@@ -284,6 +568,12 @@ def _build_audio_contract(plan, shot, dialogue):
         "bgm": bgm,
         "sfx": sfx,
         "lip_sync": bool(audio.get("lip_sync", speech and bool(shot.get("characters")))),
+        "voice_continuity_method": audio.get("voice_continuity_method") or "text_contract_and_human_qc",
+        "bgm_continuity_method": audio.get("bgm_continuity_method") or
+        ("post_mix_preferred" if bgm else "none"),
+        "sfx_continuity_method": audio.get("sfx_continuity_method") or "text_contract_and_human_qc",
+        "media_reference_method": audio.get("media_reference_method") or
+        "basicrouter_video_v1_has_no_public_audio_reference_field",
     }
 
 
@@ -457,6 +747,115 @@ def _inject_scene_transitions(shots):
         prev_scene = scene_id
 
 
+def _is_empty_continuity(value):
+    if value is None:
+        return True
+    if isinstance(value, dict):
+        return not value
+    text = str(value).strip()
+    return text in ("", "{}", "null", "None")
+
+
+def _segment_state_summary(segment):
+    def _short(value, limit=72):
+        text = str(value or "").strip()
+        return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
+    timeline = segment.get("timeline") or []
+    beat = timeline[0] if timeline and isinstance(timeline[0], dict) else {}
+    parts = []
+    for key, label in (
+            ("shot_size", "景别"), ("camera", "镜头"), ("composition", "构图"),
+            ("character_action", "动作")):
+        value = beat.get(key) or segment.get(key)
+        if value:
+            parts.append("%s=%s" % (label, _short(value)))
+    refs = segment.get("ref_tags") or []
+    if refs:
+        parts.append("参考=%s" % " ".join(refs))
+    if not parts:
+        parts.append(_short(segment.get("text") or segment.get("id") or "当前镜头状态"))
+    return "；".join(str(item) for item in parts)
+
+
+def _inject_segment_continuity_fallbacks(segments):
+    output = []
+    total = len(segments or [])
+    for index, segment in enumerate(segments or []):
+        item = dict(segment)
+        state = _segment_state_summary(item)
+        previous_state = _segment_state_summary(output[index - 1]) if index > 0 else None
+        next_segment = segments[index + 1] if index + 1 < total else None
+        next_state = _segment_state_summary(next_segment) if next_segment else None
+        if _is_empty_continuity(item.get("continuity_in")):
+            if previous_state:
+                item["continuity_in"] = (
+                    "承接上一段结尾状态：%s。本段从当前故事板镜头参考的主体位置、光线和镜头方向开始：%s。"
+                    % (previous_state, state))
+            else:
+                item["continuity_in"] = (
+                    "从本段故事板镜头参考建立的主体位置、产品比例、场景光线和镜头方向开始：%s。"
+                    % state)
+        if _is_empty_continuity(item.get("continuity_out")):
+            if next_state:
+                item["continuity_out"] = (
+                    "本段结束时保持：%s。为下一段预留自然剪辑关系：%s。"
+                    % (state, next_state))
+            else:
+                item["continuity_out"] = "本段以稳定清晰的产品/人物状态收尾：%s。" % state
+        output.append(item)
+    return output
+
+
+def _audio_state_summary(segment):
+    audio = segment.get("audio_contract") or {}
+    parts = []
+    for key, label in (("language", "语言"), ("voice", "声音"),
+                       ("bgm", "BGM"), ("sfx", "音效")):
+        if audio.get(key):
+            parts.append("%s=%s" % (label, audio[key]))
+    return "；".join(str(item) for item in parts)
+
+
+def _inject_audio_continuity_fallbacks(segments):
+    output = []
+    total = len(segments or [])
+    for index, segment in enumerate(segments or []):
+        item = dict(segment)
+        audio = dict(item.get("audio_contract") or {})
+        if audio.get("track") == "required":
+            previous_audio = _audio_state_summary(output[index - 1]) if index > 0 else None
+            next_audio = _audio_state_summary(segments[index + 1]) if index + 1 < total else None
+            audio.setdefault(
+                "voice_continuity",
+                ("承接上一段普通话女声的人设、音色、响度和语速，不突然换声线；当前段执行：%s。" %
+                 (audio.get("voice") or "保持同一中文普通话年轻女声"))
+                if previous_audio else
+                ("建立全片统一普通话女声基准，后续段保持同一音色、响度和口播距离；当前段执行：%s。" %
+                 (audio.get("voice") or "中文普通话年轻女声")))
+            audio.setdefault(
+                "bgm_continuity",
+                ("BGM 从上一段节拍和情绪自然延续，不重置、不突兀切换；当前段：%s；下一段预期：%s。" %
+                 (audio.get("bgm") or "保持同一音乐底色", next_audio or "收束"))
+                if previous_audio else
+                ("建立全片统一潮流电子节拍底色；当前段：%s；后续段只做强弱和收束变化。" %
+                 (audio.get("bgm") or "轻快潮流电子节拍")))
+            audio.setdefault(
+                "sfx_continuity",
+                "音效只做动作点缀，贴合画面动作，不盖过人声；当前段：%s。" %
+                (audio.get("sfx") or "无额外音效"))
+            audio.setdefault("voice_continuity_method", "text_contract_and_human_qc")
+            audio.setdefault("bgm_continuity_method",
+                             "post_mix_preferred" if audio.get("bgm") else "none")
+            audio.setdefault("sfx_continuity_method", "text_contract_and_human_qc")
+            audio.setdefault(
+                "media_reference_method",
+                "basicrouter_video_v1_has_no_public_audio_reference_field")
+            item["audio_contract"] = audio
+        output.append(item)
+    return output
+
+
 def split(plan, storyboard_dir=None, fps=30, min_seconds=3, bw_storyboard=None,
           allow_text2video=False, client=None, allow_unconfirmed=False,
           ratio_override=None, draft_allow_unapproved_storyboard=False,
@@ -540,8 +939,10 @@ def split(plan, storyboard_dir=None, fps=30, min_seconds=3, bw_storyboard=None,
                                 "content": render_plan}
 
     # Storyboard contact sheets are commonly 16:9 even when the final video is
-    # vertical. Keep those concerns independent with an explicit override.
-    aspect = ratio_override or output_ratio(plan)
+    # vertical. Once a render plan has been confirmed, its ratio is the formal
+    # handoff contract and takes precedence over stale draft aliases.
+    render_ratio = render_plan.get("ratio") if isinstance(render_plan, dict) else None
+    aspect = ratio_override or (render_ratio if render_ratio in _RATIO_MAP else None) or output_ratio(plan)
     ratio, resolution = _RATIO_MAP.get(aspect, ("9:16", "1080p"))
     plan_refs = plan.get("asset_refs") or {}
     # max_secs already resolved above (line ~500) from the target model.
@@ -552,8 +953,13 @@ def split(plan, storyboard_dir=None, fps=30, min_seconds=3, bw_storyboard=None,
     if scene_aware:
         _check_scene_consistency(source_shots)
 
+    # Storyboard-to-video is panel-bound: every approved storyboard shot must
+    # become its own video task so the model receives the exact panel image and
+    # ref_tags for that shot. Generic duration packing can split words (e.g.
+    # "TWS" -> "TW/S") and merges unrelated visual contracts. Only the explicit
+    # oral-broadcast extension workflow keeps its special chained behavior.
     shots = partition_shots(source_shots, max_seconds=max_secs,
-                            scene_aware="auto", preserve_shots=oral_broadcast)
+                            scene_aware="auto", preserve_shots=True)
     if not shots:
         raise ValueError("storyboard_plan 无 shots，无法拆分")
 
@@ -575,9 +981,11 @@ def split(plan, storyboard_dir=None, fps=30, min_seconds=3, bw_storyboard=None,
 
     import asset_prep as asset_prep
 
-    storyboard_dir = os.path.abspath(storyboard_dir) if storyboard_dir else None
+    storyboard_dir = _resolve_current_storyboard_dir(
+        storyboard_dir, run_id, plan, storyboard) if storyboard_dir else None
     plan_fingerprint = storyboard.plan_fingerprint(plan)
     result_path, storyboard_result, shot_map = None, None, {}
+    stale_storyboard_shots = set()
     if storyboard_dir:
         if not os.path.isdir(storyboard_dir):
             raise ValueError("STORYBOARD_DIR_NOT_FOUND: %s" % storyboard_dir)
@@ -591,16 +999,22 @@ def split(plan, storyboard_dir=None, fps=30, min_seconds=3, bw_storyboard=None,
             if run_id is not None and str(run_id) != str(result_run_id):
                 raise ValueError("RUN_ID_MISMATCH: storyboard 不属于当前 run")
             run_id = result_run_id
-            if storyboard_result.get("plan_fingerprint") != plan_fingerprint:
+            plan_changed = storyboard_result.get("plan_fingerprint") != plan_fingerprint
+            stale_storyboard_shots = _stale_storyboard_shot_ids(
+                storyboard_result, source_shots, storyboard) if plan_changed else set()
+            if plan_changed and len(stale_storyboard_shots) == len(source_shots):
                 raise ValueError("STALE_STORYBOARD: storyboard plan fingerprint 已过期")
-            if (not draft_allow_unapproved_storyboard and
-                    not storyboard.storyboard_approval_is_current(
-                        result_path, client=client, run_id=run_id,
-                        out_dir=storyboard_dir,
-                        plan_fingerprint_value=plan_fingerprint)):
+            approval_current = storyboard.storyboard_approval_is_current(
+                result_path, client=client, run_id=run_id, out_dir=storyboard_dir,
+                plan_fingerprint_value=plan_fingerprint)
+            # A dialogue-only revision changes the full plan fingerprint but not
+            # any image contract. Existing panel-scoped approvals remain valid.
+            if (not draft_allow_unapproved_storyboard and not approval_current and
+                    (not plan_changed or stale_storyboard_shots)):
                 raise ValueError("STORYBOARD_APPROVAL_REQUIRED: 故事板未确认或确认已失效")
             shot_map = _storyboard_shot_map(storyboard_result)
             generated_refs = dict(plan_refs)
+            confirmed_stage_paths = {}
             # Replace raw source references with the confirmed generated board
             # for each stage. Keeping both duplicates the same semantic anchor
             # and can evict the usage/storyboard refs.
@@ -610,16 +1024,23 @@ def split(plan, storyboard_dir=None, fps=30, min_seconds=3, bw_storyboard=None,
                     ("product_board", "product_boards", "product")):
                 item = storyboard_result.get(result_key) or {}
                 path = item.get("abspath") or item.get("path")
+                video_ref = _result_item_video_ref(
+                    item, storyboard_dir=storyboard_dir, result_key=result_key)
                 source_fp = item.get("source_fingerprint")
-                if (path and source_fp and item.get("status") == "confirmed" and
-                        storyboard._approval_current(storyboard_dir, approval_kind, source_fp)):
+                if (path and _confirmed_generated_board_current(
+                        storyboard_dir, approval_kind, item, source_fp, storyboard)):
                     if ref_key == "product_usage_images":
                         generated_refs.pop("usage_reference_images", None)
                     if ref_key == "cast_boards":
                         generated_refs.pop("digital_human_portraits", None)
                     if ref_key == "product_boards":
                         generated_refs.pop("product_images", None)
-                    generated_refs[ref_key] = [os.path.abspath(path)]
+                    generated_refs[ref_key] = [video_ref or os.path.abspath(path)]
+                    confirmed_stage_paths[ref_key] = video_ref or os.path.abspath(path)
+            if storyboard_result.get("reference_registry"):
+                generated_refs["reference_registry"] = (
+                    _remap_reference_registry_to_confirmed_boards(
+                        storyboard_result["reference_registry"], confirmed_stage_paths))
             plan_refs = generated_refs
     run_id = str(run_id or plan.get("run_id") or plan_fingerprint)
     approval_identity = {
@@ -636,15 +1057,22 @@ def split(plan, storyboard_dir=None, fps=30, min_seconds=3, bw_storyboard=None,
     for i, shot in enumerate(shots):
         sid = str(shot.get("id") or (i + 1))
         source_ids = shot.get("source_shot_ids") or [shot.get("source_shot_id") or sid]
-        shot_image = _find_shot_image(shot_map, sid, source_ids)
-        if storyboard_dir and not shot_image:
+        if any(str(source_id) in stale_storyboard_shots for source_id in source_ids):
+            missing.append(sid)
+            continue
+        shot_image_record = _find_shot_image(shot_map, sid, source_ids)
+        shot_image_path = ((shot_image_record or {}).get("path")
+                           if isinstance(shot_image_record, dict) else shot_image_record)
+        shot_image_url = ((shot_image_record or {}).get("url")
+                          if isinstance(shot_image_record, dict) else None)
+        if storyboard_dir and not shot_image_path:
             missing.append(sid)
         # shot 级 color_mode 可覆盖 plan 级
         shot_bw = bw_storyboard
         if shot.get("color_mode"):
             shot_bw = str(shot["color_mode"]).lower() in ("bw", "black_white", "grayscale", "mono", "黑白")
         references, dropped = _collect_typed_references(
-            shot, plan_refs, shot_image, bw_storyboard=shot_bw)
+            shot, plan_refs, shot_image_url or shot_image_path, bw_storyboard=shot_bw)
         urls = [ref["url"] for ref in references]
         dropped_references.extend(dict(item, shot_id=sid) for item in dropped)
         if not urls and not allow_text2video:
@@ -691,8 +1119,11 @@ def split(plan, storyboard_dir=None, fps=30, min_seconds=3, bw_storyboard=None,
         # - 仅场景（无产品） → 单主体（type 2）
         env_element_count = sum([has_human, has_product, has_scene])
         has_environment = env_element_count >= 2
+        usage_required = any(ref.get("type") == "product_usage_identity"
+                             for ref in references)
         required_types = _required_reference_types(
-            has_human=has_human, has_product=has_product)
+            has_human=has_human, has_product=has_product,
+            usage_required=usage_required)
         dropped_required = [item for item in dropped if item.get("type") in required_types]
         if dropped_required and not draft_allow_unapproved_storyboard:
             raise ValueError(
@@ -733,7 +1164,23 @@ def split(plan, storyboard_dir=None, fps=30, min_seconds=3, bw_storyboard=None,
         text = "\n".join(parts) or (shot.get("visual") or "产品展示镜头")
 
         style = plan.get("visual_style") or (plan.get("render_profile") or {}).get("video_style_prompt", "")
-        contract = _build_clip_contract(plan, shot, references, ratio, style, secs)
+        ref_tags = shot.get("ref_tags") or [ref.get("tag") for ref in references
+                                             if ref.get("tag") and ref.get("type") != "storyboard_composition"]
+        if isinstance(ref_tags, str):
+            ref_tags = [ref_tags]
+        available_ref_tags = [ref.get("tag") for ref in references
+                              if ref.get("tag") and ref.get("type") != "storyboard_composition"]
+        ref_tags = [tag for tag in ref_tags if tag in set(available_ref_tags)]
+        # A confirmed usage board is mandatory only for shots that actually
+        # express a physical use relation. Plain presenter/product CTA shots
+        # must not inherit magnetic-use geometry.
+        if usage_required:
+            usage_tags = [ref.get("tag") for ref in references
+                          if ref.get("type") == "product_usage_identity" and ref.get("tag")]
+            ref_tags = list(dict.fromkeys(list(ref_tags) + usage_tags))
+        contract = _build_clip_contract(
+            plan, dict(shot, ref_tags=ref_tags), references, ratio, style, secs)
+        reference_bindings = _reference_bindings(shot, references, has_human, has_product)
         # 服装锁定：从人物描述/角色板元数据提取服装细节
         clothing_lock = _extract_clothing_lock(plan, shot)
 
@@ -759,10 +1206,27 @@ def split(plan, storyboard_dir=None, fps=30, min_seconds=3, bw_storyboard=None,
             "ratio": ratio,
             "resolution": resolution,
             "storyboard_ref": True,
-            "storyboard_path": shot_image,
+            # Seedance can use native storyboard guidance. If generation falls
+            # back to Kling, video_engine will prepare a single-shot keyframe.
+            "storyboard_ref_mode": "native_storyboard",
+            "storyboard_path": shot_image_path,
+            "storyboard_url": shot_image_url,
+            "storyboard_panel_mode": "shot_representative_keyframe",
+            # panel_index identifies the current shot inside the approved
+            # contact sheet. Seedance uses it natively; Kling fallback asks
+            # gpt-image-2 for a clean img2img keyframe rather than a pixel crop.
+            "storyboard_panel_index": int(shot.get("panel_index") or (i + 1)),
+            "ref_tags": ref_tags,
+            "reference_bindings": reference_bindings,
+            "risk_profile": panel_expansion.risk_profile({
+                "id": sid, "ref_tags": ref_tags, "visual": shot.get("visual"),
+                "action": shot.get("action"), "character_action": shot.get("character_action"),
+                "shot_size": shot.get("shot_size"), "prop_prompts": shot.get("prop_prompts"),
+            }),
             "storyboard_dir": storyboard_dir,
             "storyboard_plan_fingerprint": plan_fingerprint,
             "storyboard_result_fingerprint": storyboard_fingerprint,
+            "storyboard_shot_fingerprint": storyboard.shot_fingerprint(shot),
             "out_path": os.path.join("output", client, run_id, "seg_%s.mp4" % sid),
             "model": "kling-v3-omni-video" if oral_broadcast else None,
             "seedance_native": True,
@@ -833,6 +1297,14 @@ def split(plan, storyboard_dir=None, fps=30, min_seconds=3, bw_storyboard=None,
                 segment["continuity_in"] = None
                 segment["clip_contract"]["scopes"]["clip"]["continuation_mode"] = "fresh_scene"
 
+    continuity_graph = storyboard_enhancements.build_continuity_graph(shots)
+    # Existing authored plans may omit explicit coverage metadata. Preserve the
+    # historical permissive split behavior but surface this as a report; plans
+    # that do declare contradictory screen direction remain blocked upstream.
+    segments = storyboard_enhancements.inject_continuity(segments, dict(
+        continuity_graph, ok=True, errors=[]))
+    segments = _inject_segment_continuity_fallbacks(segments)
+    segments = _inject_audio_continuity_fallbacks(segments)
     for segment in segments:
         handoff = build_video_handoff(segment)
         segment["video_handoff_fingerprint"] = handoff["fingerprint"]
@@ -842,6 +1314,7 @@ def split(plan, storyboard_dir=None, fps=30, min_seconds=3, bw_storyboard=None,
         "run_id": run_id,
         "storyboard_approval": approval_identity,
         "segments": segments,
+        "continuity_graph": continuity_graph,
         "total_seconds": total_seconds,
         "total_frames": total_seconds * fps,
         "missing_images": missing,
@@ -1023,6 +1496,8 @@ def record_video_stage_pending(manifest, manifest_path, *, client, segments_path
         segments_spec = json.load(handle)
     with open(results_path, encoding="utf-8") as handle:
         results_value = json.load(handle)
+    with open(reviews_path, encoding="utf-8") as handle:
+        reviews_value = json.load(handle)
     results = results_value.get("results") if isinstance(results_value, dict) else results_value
     segments = segments_spec.get("segments") or []
     if (segments_spec.get("client") != client or
@@ -1030,6 +1505,14 @@ def record_video_stage_pending(manifest, manifest_path, *, client, segments_path
         raise ValueError("VIDEO_STAGE_RUN_IDENTITY_MISMATCH")
     if len(results or []) != len(segments):
         raise ValueError("VIDEO_STAGE_RESULT_COUNT_MISMATCH")
+    if not isinstance(reviews_value, dict):
+        raise ValueError("VIDEO_STAGE_REVIEWS_MAP_REQUIRED")
+    expected_review_ids = {str(segment.get("id")) for segment in segments}
+    if set(map(str, reviews_value)) != expected_review_ids:
+        raise ValueError("VIDEO_STAGE_REVIEW_IDS_MISMATCH")
+    for segment_id, review in reviews_value.items():
+        if not isinstance(review, dict) or str(review.get("segment_id")) != str(segment_id):
+            raise ValueError("VIDEO_STAGE_REVIEW_IDENTITY_MISMATCH: %s" % segment_id)
     for segment, result in zip(segments, results):
         sid = str(segment.get("id"))
         accepted = (manifest.get("accepted_takes") or {}).get(sid) or {}
@@ -1144,6 +1627,27 @@ def derive_captions(segments_spec, fps=30, per_sentence=True, results=None):
     lines = []
     motion_plan = []
     cursor = 0.0
+    def _motion_elements_without_dialogue_duplicates(elements, dialogue):
+        """Keep post effects from rendering a second copy of spoken CTA text."""
+        spoken = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", dialogue or "").lower()
+        if not spoken:
+            return list(elements or [])
+        kept = []
+        for item in elements or []:
+            text = str(item)
+            compact = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", text).lower()
+            is_text_cta = re.search(r"cta|片尾|品牌", text, re.IGNORECASE)
+            clauses = re.split(r"[：:，,；;。.!！?？]", text)
+            duplicates_spoken = any(
+                len(re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", clause)) >= 4
+                and re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", clause).lower() in spoken
+                for clause in clauses
+            )
+            if is_text_cta and duplicates_spoken:
+                continue
+            kept.append(item)
+        return kept
+
     idx = 1
     for seg in segs:
         sid = seg.get("id")
@@ -1167,9 +1671,10 @@ def derive_captions(segments_spec, fps=30, per_sentence=True, results=None):
             "dialogue": dialogue,
             "emphasis_keywords": [],          # 待用户/LLM 标：需快闪强调的关键词
             "motion": "",                      # 待填：kinetic/pop-in/underline/none 等动效意图
-            "motion_elements": list(seg.get("motion_elements") or [])
+            "motion_elements": _motion_elements_without_dialogue_duplicates(
+                list(seg.get("motion_elements") or [])
                 if not isinstance(seg.get("motion_elements"), str)
-                else [seg["motion_elements"]],
+                else [seg["motion_elements"]], dialogue),
             "note": "",
         })
 
@@ -1324,6 +1829,14 @@ def confirm_captions(manifest, manifest_path, caption_manifest_path, *, client):
 def _probe_duration(video_path):
     """Read the actual rendered duration; returns None when ffprobe is unavailable."""
     ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        try:
+            import static_ffmpeg
+            root = os.path.dirname(os.path.abspath(static_ffmpeg.__file__))
+            matches = glob.glob(os.path.join(root, "bin", "**", "ffprobe"), recursive=True)
+            ffprobe = matches[0] if matches else None
+        except Exception:
+            ffprobe = None
     if not ffprobe or not os.path.isfile(video_path):
         return None
     try:
@@ -1475,6 +1988,8 @@ def main(argv=None):
         if a.manifest:
             with open(a.manifest, encoding="utf-8") as f:
                 manifest = json.load(f)
+            rm.identity_gate(manifest, client=a.client)
+            rm.generation_gate(manifest, "video", client=a.client)
             artifacts = (manifest.get("generation", {}).get("render_plan", {})
                          .get("artifacts") or [])
             if len(artifacts) != 1:
@@ -1490,14 +2005,13 @@ def main(argv=None):
                        render_plan_artifact=render_plan_artifact)
         text = json.dumps(result, ensure_ascii=False, indent=2)
         if a.out:
-            _atomic_json(a.out, result)
             if a.manifest:
-                rm.identity_gate(manifest, client=a.client)
-                rm.generation_gate(manifest, "video", client=a.client)
                 if str(result.get("run_id")) != str(manifest.get("run_id")):
                     raise ValueError("VIDEO_HANDOFF_RUN_IDENTITY_MISMATCH")
-                if result.get("needs_image") or not result.get("segments"):
-                    raise ValueError("VIDEO_HANDOFF_INCOMPLETE: split 尚有待补素材或无 segments")
+                if result.get("needs_image") or result.get("missing_images") or not result.get("segments"):
+                    raise ValueError("VIDEO_HANDOFF_INCOMPLETE: split 尚有待补素材/缺失分镜图或无 segments")
+            _atomic_json(a.out, result)
+            if a.manifest:
                 rm.record_video_handoff(manifest, result, a.out)
                 rm.save_manifest(manifest, a.manifest)
             print("已拆分: %s（%d 段，总时长 %ds）"

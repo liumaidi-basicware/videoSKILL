@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "assets": {
+    "product:69f2a960116f4caa6aae4d0c50f1bc4b8dcf803a9294d9cb3901706b8fe25488": {
+      "kind": "product",
+      "source_fingerprint": "69f2a960116f4caa6aae4d0c50f1bc4b8dcf803a9294d9cb3901706b8fe25488",
+      "path": "/Users/liu/Downloads/marketing-video-agent-shotcraft-20260805/output/storyboard/momax-1vibe-go-lite-20260805-v1/product_board_pending.jpg",
+      "board_sha256": "f2ad295f98e716857c62852717bd5129a26d7ef21e0f961af82f01b7d61a0830",
+      "model": "gpt-image-2",
+      "confirmed_at": "2026-08-05T18:15:09"
+    },
+    "cast:eef87614db149559551db437e4ec06dc574b7a4c0cce02e0a90a6fd5bc4641a8": {
+      "kind": "cast",
+      "source_fingerprint": "eef87614db149559551db437e4ec06dc574b7a4c0cce02e0a90a6fd5bc4641a8",
+      "path": "/Users/liu/Downloads/marketing-video-agent-shotcraft-20260805/output/storyboard/momax-1vibe-go-lite-20260805-v1/cast_board.jpg",
+      "board_sha256": "3152a54dd0fb74d9378468ddf13669090a2140346cdd09b8ddf1b664497be017",
+      "model": "gpt-image-2",
+      "confirmed_at": "2026-08-06T16:05:44",
+      "url": "https://midwayflow-flie.oss-accelerate.aliyuncs.com/prod/microsoft-openai-image/02fb2201-e1f5-4f57-858e-04ac4ea87ef1.png",
+      "task_id": "f8adffd5-e7fc-4196-872a-9643462645d2",
+      "request_id": "image-9609aa4983fa956aeb47720f4683a1e3f0958fdb24a03738b2f4a645dda4321e"
+    },
+    "product:94a1b0041b1107470430dfa2fa786eea9b341216b05a0b16eb0734a5faeb0b98": {
+      "kind": "product",
+      "source_fingerprint": "94a1b0041b1107470430dfa2fa786eea9b341216b05a0b16eb0734a5faeb0b98",
+      "path": "/Users/liu/Downloads/marketing-video-agent-shotcraft-20260805/output/storyboard/momax-1vibe-go-lite-20260805-v1/product_board_pending.jpg",
+      "board_sha256": "ea8e3523808dd54501ac514c551d11d2cd5fbd78cf066a6f15b8664ce6bdb2f8",
+      "model": "gpt-image-2",
+      "confirmed_at": "2026-08-06T16:57:51",
+      "url": "https://midwayflow-flie.oss-accelerate.aliyuncs.com/prod/microsoft-openai-image/fb13e79d-6fbd-49ad-9275-7296d6f491fa.png",
+      "result_url": "https://midwayflow-flie.oss-accelerate.aliyuncs.com/prod/microsoft-openai-image/fb13e79d-6fbd-49ad-9275-7296d6f491fa.png",
+      "task_id": "9f0761df-541a-4ec8-942e-79c985ff4fb2",
+      "request_id": "product-board-4b9030fdb8c898fe113c7831ff5a1dc79975938d00de90f3c51ef06d707e051e"
+    },
+    "product:e34ee765e33e472de131996ea482ff8c09ae245d439b05625648793c092ea7c9": {
+      "kind": "product",
+      "source_fingerprint": "e34ee765e33e472de131996ea482ff8c09ae245d439b05625648793c092ea7c9",
+      "path": "/Users/liu/Downloads/marketing-video-agent-shotcraft-20260805/output/storyboard/momax-1vibe-go-lite-20260805-v1__r04/product_board_pending.jpg",
+      "board_sha256": "6873fcfd62404d0c33a299d1c0613b4d270528b3014604f2134c3350a9956e65",
+      "model": "gpt-image-2",
+      "confirmed_at": "2026-08-06T17:56:08",
+      "url": "https://midwayflow-flie.oss-accelerate.aliyuncs.com/prod/microsoft-openai-image/e86991ea-378d-436b-85f5-5c3547d81616.png",
+      "result_url": "https://midwayflow-flie.oss-accelerate.aliyuncs.com/prod/microsoft-openai-image/e86991ea-378d-436b-85f5-5c3547d81616.png",
+      "task_id": "c65fd6de-9011-4358-8abe-2f0f742599be",
+      "request_id": "product-board-472d061cde22e256f4543534b6af2dcaf73405751f4f1a97339269fd4e70edfe"
+    }
+  }
+}

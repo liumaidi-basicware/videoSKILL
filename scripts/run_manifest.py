@@ -19,8 +19,8 @@ from agent_runtime import detect_agent_runtime
 
 
 STAGES = (
-    "brief", "script", "product_board", "cast_board", "product_usage", "storyboard", "render_plan",
-    "video", "captions", "final", "derive",
+    "brief", "script", "styleframe", "audio", "product_board", "cast_board", "product_usage",
+    "storyboard", "render_plan", "test_segment", "video", "shotcraft_packaging", "captions", "final", "derive",
 )
 
 
@@ -33,12 +33,16 @@ class ManifestConflictError(ValueError):
 BASE_DEPENDENCIES = {
     "brief": (),
     "script": ("brief",),
+    "styleframe": ("script",),
+    "audio": ("script",),
     "cast_board": ("script",),
     "product_board": ("brief",),
     "product_usage": ("script", "product_board", "cast_board"),
     "storyboard": ("script", "cast_board"),
     "render_plan": ("storyboard",),
+    "test_segment": ("storyboard", "render_plan"),
     "video": ("storyboard", "render_plan"),
+    "shotcraft_packaging": ("video",),
     "captions": ("video",),
     "final": ("captions",),
     "derive": ("final",),
@@ -134,6 +138,12 @@ def create_manifest(client, run_id, *, script_path=None, plan_path=None):
         "ocr_waivers": {},
         "requires_product_board": _plan_requires_product_board(plan_path),
         "requires_product_usage": _plan_requires_product_usage(plan_path),
+        # New production enhancements are opt-in for compatibility with runs
+        # created before Shotcraft/audio/test-segment contracts existed.
+        "requires_styleframe": False,
+        "requires_audio": False,
+        "requires_test_segment": False,
+        "requires_shotcraft_packaging": False,
         "identity": {
             "client": client,
             "asset_dir": os.path.abspath(os.path.join(
@@ -154,6 +164,57 @@ def _file_record(path):
         with open(path, "rb") as handle:
             record["sha256"] = _digest(handle.read())
     return record
+
+
+def _resolve_artifact_path(value, *, base_dir=None):
+    if not value:
+        return None
+    path = str(value)
+    if os.path.isabs(path):
+        return path
+    cwd_path = os.path.abspath(path)
+    if os.path.exists(cwd_path) or not base_dir:
+        return cwd_path
+    return os.path.abspath(os.path.join(base_dir, path))
+
+
+def _storyboard_result_artifact_paths(result_path):
+    """Expand storyboard_result.json into every image approved by the user."""
+    result_path = os.path.abspath(result_path)
+    paths = [result_path]
+    try:
+        with open(result_path, encoding="utf-8") as handle:
+            result = json.load(handle)
+    except Exception:
+        return paths
+    base_dir = os.path.dirname(result_path)
+
+    def add(value):
+        path = _resolve_artifact_path(value, base_dir=base_dir)
+        if path and path not in paths:
+            paths.append(path)
+
+    for key in ("cast_board", "product_board", "product_usage_image"):
+        item = result.get(key) or {}
+        if isinstance(item, dict):
+            add(item.get("abspath") or item.get("path"))
+    for item in result.get("shots") or []:
+        if isinstance(item, dict):
+            add(item.get("abspath") or item.get("path"))
+    return paths
+
+
+def _expand_stage_outputs(stage, outputs):
+    expanded = []
+    for path in outputs:
+        stage_paths = [path]
+        if stage == "storyboard" and str(path).endswith(".json"):
+            stage_paths = _storyboard_result_artifact_paths(path)
+        for item in stage_paths:
+            resolved = _resolve_artifact_path(item)
+            if resolved and resolved not in expanded:
+                expanded.append(resolved)
+    return expanded
 
 
 def file_record(path):
@@ -309,6 +370,14 @@ def generation_dependencies(manifest, stage):
         dependencies.append("product_board")
     if stage in ("storyboard", "video") and requires_usage:
         dependencies.append("product_usage")
+    if stage in ("storyboard", "render_plan", "video", "shotcraft_packaging", "captions", "final", "derive") and manifest.get("requires_styleframe"):
+        dependencies.append("styleframe")
+    if stage in ("render_plan", "test_segment", "video", "shotcraft_packaging", "captions", "final", "derive") and manifest.get("requires_audio"):
+        dependencies.append("audio")
+    if stage == "video" and manifest.get("requires_test_segment"):
+        dependencies.append("test_segment")
+    if stage in ("captions", "final", "derive") and manifest.get("requires_shotcraft_packaging"):
+        dependencies.append("shotcraft_packaging")
     return tuple(dependencies)
 
 
@@ -362,7 +431,7 @@ def mark_generation_finished(manifest, stage, outputs=()):
         raise ValueError("VIDEO_STAGE_SPECIALIZED_FINISH_REQUIRED")
     if stage not in BASE_DEPENDENCIES:
         raise ValueError("未知生成阶段: %s" % stage)
-    outputs = list(outputs)
+    outputs = _expand_stage_outputs(stage, list(outputs))
     output_records = [_file_record(path) for path in outputs]
     missing = [os.path.abspath(path) for path, record in zip(outputs, output_records)
                if not record or not record.get("exists")]

@@ -21,7 +21,19 @@
         "global": {"type": "object"},
         "scene": {"type": "object"},
         "clip": {"type": "object"},
-        "beats": {"type": "array"}
+        "beats": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "panel_index": {"type": "integer", "minimum": 1},
+              "ref_tags": {
+                "type": "array",
+                "items": {"type": "string", "pattern": "^@[a-z][a-z0-9_]*$"}
+              }
+            }
+          }
+        }
       }
     }
   }

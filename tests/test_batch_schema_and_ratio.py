@@ -11,6 +11,7 @@ sys.path.insert(0, SCRIPTS)
 
 import script_splitter as ss  # noqa: E402
 import video_engine as ve  # noqa: E402
+import aspect_ratio  # noqa: E402
 
 
 class BatchSchemaAndRatioTests(unittest.TestCase):
@@ -47,6 +48,19 @@ class BatchSchemaAndRatioTests(unittest.TestCase):
                           allow_unconfirmed=True)
         self.assertEqual(result["ratio"], "9:16")
         self.assertEqual(result["segments"][0]["ratio"], "9:16")
+
+    def test_video_aspect_ratio_alias_is_used_for_output_ratio(self):
+        self.assertEqual(
+            aspect_ratio.output_ratio({"aspect_ratio": "16:9", "video_aspect_ratio": "1:1"}),
+            "1:1")
+
+    def test_confirmed_render_plan_ratio_overrides_stale_video_alias(self):
+        plan = {"aspect_ratio": "16:9", "video_aspect_ratio": "9:16",
+                "render_plan": {"status": "confirmed", "ratio": "16:9"},
+                "shots": [{"id": "s1", "duration": 4, "dialogue": "测试"}]}
+        result = ss.split(plan, client="test", allow_text2video=True)
+        self.assertEqual(result["ratio"], "16:9")
+        self.assertEqual(result["segments"][0]["ratio"], "16:9")
 
 
 if __name__ == "__main__":

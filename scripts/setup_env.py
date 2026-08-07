@@ -80,6 +80,42 @@ def _pip_install(specs):
     return r.returncode == 0
 
 
+def clean_stale_locks(verbose=True, stale_after=300.0, roots=("assets", "output")):
+    """清理残留的 stale FileLock（进程崩溃后遗留的 *.lock，mtime 超过 stale_after）。
+
+    FileLock 自身有 stale 检测，但没人定期扫描——assets/ 下已实测出现 3 个
+    残留锁文件。只删除 mtime 超过阈值的 .lock，绝不碰其他文件。
+    """
+    import time
+    removed = []
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    now = time.time()
+    for root in roots:
+        base = os.path.join(project_root, root)
+        if not os.path.isdir(base):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(base):
+            for name in filenames:
+                if not name.endswith(".lock"):
+                    continue
+                path = os.path.join(dirpath, name)
+                try:
+                    age = now - os.path.getmtime(path)
+                except OSError:
+                    continue
+                if age <= stale_after:
+                    continue
+                try:
+                    os.remove(path)
+                    removed.append(path)
+                except OSError:
+                    pass
+    if verbose and removed:
+        print("  [清理] 移除 %d 个 stale lock：%s"
+              % (len(removed), ", ".join(os.path.relpath(p, project_root) for p in removed)))
+    return removed
+
+
 def check(verbose=True, include_optional=True):
     """检测核心依赖。返回 missing（仅核心项，影响 READY 退出码）。
 
@@ -101,6 +137,7 @@ def check(verbose=True, include_optional=True):
             if verbose:
                 print("  [%s] %-16s %s%s" % ("OK" if ok else "~~", mod, purpose,
                                              "" if ok else "  (可选,缺失则OCR跳过)"))
+    clean_stale_locks(verbose=verbose)
     return missing
 
 

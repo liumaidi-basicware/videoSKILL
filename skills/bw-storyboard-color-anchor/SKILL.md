@@ -31,7 +31,7 @@ python3 scripts/storyboard.py --plan output/storyboard_plan.json \
   --out-dir output/storyboard --model gpt-image-2 --json
 ```
 
-- 默认黑白（`shot_prompt` 内建 `STRICT BLACK-AND-WHITE` + 约束：主体定义句式、16:9 4x3 镜头1→12 时序、双胞胎全局约束、无字幕/Logo/水印）。客户要彩色故事板才加 `--color`，或 plan/shot 设 `color_mode:"color"`。
+- 默认黑白（`shot_prompt` 内建 `STRICT BLACK-AND-WHITE` + 约束：主体定义句式、16:9 动态格数镜头1→N 时序、双胞胎全局约束、无字幕/Logo/水印）。客户要彩色故事板才加 `--color`，或 plan/shot 设 `color_mode:"color"`。
 - 人物板 `cast_board.jpg` 六视图 + **近景人脸↔全身一致性强锁**：正脸大头照是最高权重身份锚（占比大、五官清晰、无表情），与全身照必须逐项对齐是同一张脸（防 seedance ID 漂移）。
 - 把 `preview_html`/`index_md` 用绝对路径 Markdown 交客户确认构图/顺序/人物形象。
 

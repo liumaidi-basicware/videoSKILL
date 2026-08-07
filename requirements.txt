@@ -11,3 +11,5 @@ static-ffmpeg>=2.5      # 静态 ffmpeg+ffprobe 二进制（HyperFrames/Remotion
 pyobjc-framework-Vision>=10.0   # macOS Vision OCR 框架绑定
 pyobjc-framework-Quartz>=10.0   # Vision 依赖的 Quartz/CoreImage 绑定
 # 注：数字人抠像/换背景一律走外部模型能力（BasicRouter img2img/参考图），本地不装 rembg/onnxruntime，保持轻交付
+# 可选增强：jsonschema>=4.0 — 安装后 schema_validate.py 用权威实现做契约校验；
+# 未安装时使用内置 mini 校验器（覆盖本项目 schema 全部关键字），保持零新增依赖也能 fail-closed

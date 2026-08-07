@@ -152,12 +152,14 @@ def create_actor(client, actor, gender="", style="", language="",
         api_key = api_key or key_setup.load_key()
         if not api_key:
             raise SystemExit(ux.friendly_error("No API key. Run key onboarding first."))
-        urls = br_client.create_image(
+        task_id = br_client.create_image_generation(
             api_key, prompt, model="seedream-5.0",
             count=1, resolution="2k", ratio="9:16")
+        print("[digital-human] image task submitted: %s" % task_id, flush=True)
+        urls = br_client.wait_image_generation(api_key, task_id, interval=5, max_wait=900)
         if not urls:
             raise SystemExit("image generation returned no URL")
-        br_client.download(urls[0], portrait)
+        br_client.download(urls[0], portrait, allow_nonpublic_peer=True)
         source = "generated"
 
     meta = {"name": actor, "client": client, "gender": gender,

@@ -26,4 +26,8 @@ offline-assets/
 # WorkBuddy 内部记忆（项目级会话数据）
 .workbuddy/
 unittest_client_*/
+assets/unittest_client_*/
 _tmp_test_*
+
+# 本地交付包由验证后的构建流程生成，不进入源码提交
+dist/

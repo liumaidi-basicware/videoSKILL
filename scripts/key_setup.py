@@ -77,9 +77,12 @@ def ensure_session_id(host_session_id=None):
             # new random ID per shell, breaking save/load key pairing.
             project_dir = os.path.dirname(os.path.abspath(
                 os.path.join(os.path.dirname(__file__), "..")))
-            host = runtime["name"] + ":" + project_dir
+            # The fallback is deliberately Agent-independent. Runtime name is
+            # diagnostic metadata only and must not select a different key or
+            # prevent Kilo/Codex/Hermes from resuming the same run.
+            host = "project:" + project_dir
     digest = hashlib.sha256(str(host).encode("utf-8")).hexdigest()[:32]
-    value = "br-%s-%s" % (agent_runtime.detect_agent_runtime()["name"], digest)
+    value = "br-project-%s" % digest
     os.environ[SESSION_ENV] = value
     if SESSION_STATE_FILE:
         directory = os.path.dirname(SESSION_STATE_FILE) or "."
@@ -104,6 +107,16 @@ def session_id(explicit=None):
     return value.strip() if value and value.strip() else None
 
 
+def _legacy_session_ids():
+    """Return pre-fix runtime-scoped IDs for read-only key migration."""
+    project_dir = os.path.dirname(os.path.abspath(os.path.join(HERE, "..")))
+    ids = []
+    for runtime_name in ("codex", "kilo", "hermes", "unknown"):
+        digest = hashlib.sha256((runtime_name + ":" + project_dir).encode("utf-8")).hexdigest()[:32]
+        ids.append("br-%s-%s" % (runtime_name, digest))
+    return ids
+
+
 def session_key_path(explicit_session_id=None):
     sid = session_id(explicit_session_id)
     if not sid:
@@ -114,16 +127,46 @@ def session_key_path(explicit_session_id=None):
 
 
 def load_key(explicit_session_id=None):
-    """Return the current session key, or an explicitly allowed env key."""
-    path = session_key_path(explicit_session_id)
-    if path:
-        with FileLock(path + ".lock"):
-            if os.path.exists(path):
-                if os.path.islink(path):
-                    raise ValueError("SESSION_KEY_SYMLINK_BLOCKED")
-                with open(path) as f:
-                    k = f.read().strip()
-                    return k or None
+    """Return the current session key, or an explicitly allowed env key.
+
+    Writers replace the key atomically while holding ``key.lock``. A reader
+    can safely open the immutable snapshot without creating that lock, which
+    also allows sandboxed Agent subprocesses to use a host-provisioned cache.
+    """
+    session_candidates = [session_id(explicit_session_id)]
+    if not explicit_session_id and session_candidates[0]:
+        session_candidates.extend(_legacy_session_ids())
+    for candidate in session_candidates:
+        if not candidate:
+            continue
+        path = session_key_path(candidate)
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags)
+        except FileNotFoundError:
+            fd = None
+        except OSError as exc:
+            if os.path.islink(path):
+                raise ValueError("SESSION_KEY_SYMLINK_BLOCKED") from exc
+            raise
+        if fd is not None:
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode):
+                    raise ValueError("SESSION_KEY_NOT_REGULAR_FILE")
+                if info.st_size > 16384:
+                    raise ValueError("SESSION_KEY_FILE_TOO_LARGE")
+                data = os.read(fd, 16385)
+                if len(data) > 16384:
+                    raise ValueError("SESSION_KEY_FILE_TOO_LARGE")
+                try:
+                    k = data.decode("utf-8").strip()
+                except UnicodeDecodeError as exc:
+                    raise ValueError("SESSION_KEY_INVALID_ENCODING") from exc
+                if k:
+                    return k
+            finally:
+                os.close(fd)
     # Global environment keys are intentionally opt-in for CI/development.
     if os.environ.get("BR_ALLOW_GLOBAL_KEY") == "1":
         env = os.environ.get(API_KEY_ENV)

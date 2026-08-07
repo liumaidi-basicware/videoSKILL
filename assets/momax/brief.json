@@ -1,0 +1,137 @@
+{
+  "client": "momax",
+  "product": "1-Vibe Go Lite 馬卡龍磁吸無線音箱",
+  "model": "BS8",
+  "video_type": "product_showcase",
+  "objective": "sales_conversion",
+  "duration_secs": 25,
+  "language": "zh-CN",
+  "use_digital_human": true,
+  "actor": "mina",
+  "actor_client": "aeroclip",
+  "features": [
+    "馬卡龍七色配色，小巧可愛高顏值",
+    "磁吸設計，輕鬆吸附金屬表面或MagSafe手機",
+    "TWS串聯技術，兩台配對沉浸式立體聲",
+    "75克超輕巧，可當手機支架",
+    "12小時超長續航",
+    "IPX4防水，戶外不怕",
+    "內置麥克風，清晰通話"
+  ],
+  "visual_style": "lifestyle_trendy",
+  "product_images": [
+    "assets/momax/product_images/product_06.png",
+    "assets/momax/product_images/product_05.png",
+    "assets/momax/product_images/product_07.png",
+    "assets/momax/product_images/product_09.png",
+    "assets/momax/product_images/product_04.png"
+  ],
+  "images": [
+    {
+      "path": "assets/momax/images/hero_896472560.png",
+      "tag": "hero",
+      "generated": true,
+      "prompt": "黄色马卡龙迷你磁吸蓝牙音箱，圆形小巧设计，顶部扬声器网罩，正面有控制按钮和指示灯。白色背景干净产品照。",
+      "status": "confirmed",
+      "model": "gpt-image-2",
+      "source": "assets/momax/product_images/product_04.png",
+      "source_kind": "product_or_screenshot",
+      "processing_kind": "cleaned_img2img",
+      "via": "standardize",
+      "sha256": "8025c0fa71aa1d7f24af3a58e01feb25aba45236dd9f2ed61b0a89d5225a798f"
+    },
+    {
+      "path": "assets/momax/images/three_quarter_896622304.png",
+      "tag": "three_quarter",
+      "generated": true,
+      "prompt": "黄色马卡龙迷你磁吸蓝牙音箱，3/4 角度侧面视角，圆形小巧设计，顶部扬声器网罩，正面控制按钮和指示灯，磁吸环结构清晰可见。白色背景干净产品照。",
+      "status": "confirmed",
+      "model": "gpt-image-2",
+      "source": "assets/momax/product_images/product_05.png",
+      "source_kind": "product_or_screenshot",
+      "processing_kind": "cleaned_img2img",
+      "via": "standardize",
+      "sha256": "f4aa771ba9d3ce0e9c816112bff2de95883c055edeb1c03b6a4484d7d780c42f"
+    }
+  ],
+  "sell_lines": [
+    "磁吸实用场景",
+    "马卡龙高颜值",
+    "音质与全能功能背书"
+  ],
+  "message_hierarchy": {
+    "primary": "磁吸设计：可吸附 MagSafe 手机或金属表面，也可当手机支架，让音乐跟着生活场景走。",
+    "secondary": "马卡龙七色配色与 75g 轻巧体积，第一眼有潮流感，方便随身携带。",
+    "proof": "TWS 串联、12 小时续航、IPX4 防水与内置麦克风，补足音质、户外和通话可信度。"
+  },
+  "creative_decisions": {
+    "product_showcase_scope": "A/B/C 全部需要，但按主次呈现，避免堆参数。",
+    "digital_human": "使用 aeroclip/mina 作为甜酷潮流女主持，与马卡龙音箱的年轻种草调性匹配。",
+    "script_structure": "C：产品快闪大片为主，mina 结尾一句潮流推荐收束。"
+  },
+  "script_draft": {
+    "status": "pending_client_confirmation",
+    "structure": "product_flash_film_then_mina_cta",
+    "total_duration_secs": 25,
+    "segments": [
+      {
+        "id": "s1",
+        "duration": 4,
+        "role": "visual_hook",
+        "dialogue": "这颗马卡龙，不只是好看。",
+        "visual": "多色 1-Vibe Go Lite 以快切方式逐一闪现，最后定格黄色 hero 产品。",
+        "camera": "正面近景快速推近，产品居中，下一镜转左前 45 度。"
+      },
+      {
+        "id": "s2",
+        "duration": 5,
+        "role": "primary_use_case",
+        "dialogue": "磁吸一贴，手机、冰箱、桌边，都能变成你的音乐位。",
+        "visual": "产品吸附在手机背面或金属表面，突出磁吸动作和稳定贴合。",
+        "camera": "左前 45 度中景，手部操作入镜，下一镜切到右前 35 度近景。"
+      },
+      {
+        "id": "s3",
+        "duration": 5,
+        "role": "portability_and_stand",
+        "dialogue": "75 克轻巧，还能当手机支架，出门追剧听歌都方便。",
+        "visual": "手机被产品支撑成桌面观看角度，旁边展示小巧体积。",
+        "camera": "右前 35 度近景，低角度轻推，下一镜转产品特写。"
+      },
+      {
+        "id": "s4",
+        "duration": 7,
+        "role": "feature_proof",
+        "dialogue": "两台 TWS 串联就是立体声，12 小时续航，IPX4 防水，通话也清楚。",
+        "visual": "两台音箱并排形成左右声道，户外桌面有水滴感但画面干净；参数作后期动效，不进生成画面。",
+        "camera": "产品特写到俯拍切换，构图重心由单品转双品。"
+      },
+      {
+        "id": "s5",
+        "duration": 4,
+        "role": "mina_cta",
+        "dialogue": "Momax 1-Vibe Go Lite，小小一颗，玩味十足。",
+        "visual": "mina 手持产品面向镜头，自信微笑，做自然推荐收尾。",
+        "camera": "正面半身中近景，mina 与产品同框，停留作 CTA。"
+      }
+    ]
+  },
+  "status": "scripting",
+  "revision": 4,
+  "product_type": "數碼3C/便攜音訊配件",
+  "render_profile": {
+    "visual": "潮流生活种草，年轻甜酷，产品高颜值优先",
+    "motion": "手持展示、磁吸动作、轻快推近、节奏快切、局部产品特写",
+    "palette_hint": "马卡龙彩色产品 + Momax 品牌红 #E60012 点缀，背景清爽不沉重",
+    "pace": "轻快",
+    "font_feel": "现代无衬线粗体，干净利落",
+    "video_style_prompt": "潮流生活种草短片，年轻甜酷女主持自然展示产品，清爽明亮的生活场景，马卡龙彩色产品作视觉焦点，轻快推近与快切特写，Momax 品牌红作少量点缀；画面干净，无字幕、无生成文字、无水印。"
+  },
+  "usps": [],
+  "specs": {},
+  "slogans": [],
+  "texts": [],
+  "style_hints": [],
+  "render_plan": null,
+  "ppt_files": []
+}

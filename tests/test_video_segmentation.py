@@ -26,7 +26,8 @@ class VideoSegmentationTests(unittest.TestCase):
             {"id": "b", "duration": 10, "visual": "b"},
         ]}
         result = ss.split(plan, allow_text2video=True, client="test")
-        self.assertEqual([s["duration"] for s in result["segments"]], [15, 5])
+        self.assertEqual([s["duration"] for s in result["segments"]], [10, 10])
+        self.assertEqual([s["id"] for s in result["segments"]], ["a", "b"])
         self.assertFalse(result["segments"][0].get("extend_video"))
         self.assertFalse(result["segments"][1].get("extend_video"))
 

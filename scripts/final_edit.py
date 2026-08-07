@@ -221,6 +221,12 @@ def _build_motion_overlay(shot):
                 "position": overlay_spec.get("position") or "center",
                 "timing": overlay_spec.get("timing") or "",
             }
+            if overlay_spec.get("preset"):
+                result["preset"] = overlay_spec["preset"]
+            if overlay_spec.get("size_px") is not None:
+                result["size"] = int(overlay_spec["size_px"])
+            if overlay_spec.get("width_px") is not None:
+                result["width_px"] = int(overlay_spec["width_px"])
             if overlay_spec.get("title"):
                 result["title"] = overlay_spec["title"]
             if overlay_spec.get("bullets"):
@@ -540,6 +546,14 @@ def formal_final_gate(manifest, caption_artifact, *, client, basecut_path):
     rm.identity_gate(manifest, client=client)
     if not rm.approval_is_current(manifest, "video"):
         raise ValueError("FINAL_VIDEO_APPROVAL_REQUIRED")
+    if manifest.get("requires_shotcraft_packaging"):
+        if not rm.approval_is_current(manifest, "shotcraft_packaging"):
+            raise ValueError("FINAL_SHOTCRAFT_PACKAGING_APPROVAL_REQUIRED")
+        packaging = (manifest.get("generation") or {}).get("shotcraft_packaging") or {}
+        outputs = packaging.get("artifacts") or []
+        packaged = next((item for item in outputs if str(item.get("path", "")).lower().endswith((".mp4", ".mov", ".webm"))), None)
+        if not packaged or not rm.file_record_is_current(packaged):
+            raise ValueError("FINAL_SHOTCRAFT_PACKAGING_STALE")
     script_splitter.caption_artifact_is_current(
         manifest, caption_artifact, client=client, require_approved=True)
     caption_render = manifest.get("caption_render") or {}
@@ -552,6 +566,10 @@ def formal_final_gate(manifest, caption_artifact, *, client, basecut_path):
         raise ValueError("FINAL_BASECUT_IDENTITY_MISMATCH")
     if not rm.file_record_is_current(render_output):
         raise ValueError("STALE_FINAL_BASECUT")
+    if manifest.get("requires_shotcraft_packaging") and render_output.get("sha256") == packaged.get("sha256"):
+        # Caption rendering should compose onto the packaging result, never
+        # silently bypass it by treating the unchanged source as captioned.
+        raise ValueError("FINAL_SHOTCRAFT_CAPTION_COMPOSITE_REQUIRED")
 
     with open(caption_artifact["files"]["segments"]["path"], encoding="utf-8") as handle:
         segments_spec = json.load(handle)
@@ -569,7 +587,7 @@ def formal_final_gate(manifest, caption_artifact, *, client, basecut_path):
 
 
 def record_final_generation(manifest, manifest_path, *, scheme_path, basecut_path,
-                            caption_artifact, out_path, media_qc_report=None):
+                             caption_artifact, out_path, media_qc_report=None, disclosure=None):
     """Persist exact final inputs and leave final output pending approval."""
     inputs = {
         "scheme": rm.file_record(scheme_path),
@@ -592,6 +610,8 @@ def record_final_generation(manifest, manifest_path, *, scheme_path, basecut_pat
         media_qc_report.get("media") or {}).get("actual_duration")
     manifest["delivery_qc"] = media_qc_report
     manifest["final_inputs"] = inputs
+    if disclosure is not None:
+        manifest["disclosure"] = disclosure
     rm.save_manifest(manifest, manifest_path)
     return manifest["generation"]["final"]
 
@@ -618,6 +638,8 @@ def main(argv=None):
     rn.add_argument("--client")
     rn.add_argument("--manifest", help="正式流程 run_manifest.json")
     rn.add_argument("--caption-manifest", help="已确认 caption timeline artifact")
+    rn.add_argument("--no-disclosure", action="store_true", help="客户已确认不添加 AI 生成内容披露")
+    rn.add_argument("--disclosure-lang", default="zh-CN")
     rn.add_argument("--draft", action="store_true", help="草稿兼容：允许旧的 scheme+basecut 调用")
 
     a = ap.parse_args(argv)
@@ -659,9 +681,19 @@ def main(argv=None):
             if os.path.exists(tmp_sl):
                 os.remove(tmp_sl)
         if not a.draft:
+            import ai_disclosure
+            disclosure = None
+            if not a.no_disclosure:
+                disclosed = a.out + ".disclosed.mp4"
+                disclosure = ai_disclosure.apply_disclosure(a.out, disclosed, lang=a.disclosure_lang, keep_alpha=True)
+                os.replace(disclosed, a.out)
+                disclosure["out_path"] = os.path.abspath(a.out)
+            else:
+                disclosure = {"applied": False, "style": "none", "opt_out": True}
             record_final_generation(manifest, a.manifest, scheme_path=a.scheme,
-                                    basecut_path=a.basecut,
-                                    caption_artifact=caption_artifact, out_path=a.out)
+                                     basecut_path=a.basecut,
+                                     caption_artifact=caption_artifact, out_path=a.out,
+                                     disclosure=disclosure)
             print(json.dumps({"ok": True, "out": os.path.abspath(a.out),
                               "status": "pending_approval"}, ensure_ascii=False))
 

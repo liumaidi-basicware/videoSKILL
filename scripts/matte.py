@@ -85,8 +85,11 @@ def compose_scene(human_path, scene_path, prompt, out_path=None,
             refs.append(br_client._to_data_url(p))
     log("[compose] 外部模型融合 人+景 (%d 张参考图) model=%s" % (len(refs), model))
 
-    urls = br_client.create_image(api_key, prompt, model=model, count=1,
-                                  resolution="2k", ratio=ratio, image_urls=refs)
+    task_id = br_client.create_image_generation(
+        api_key, prompt, model=model, count=1,
+        resolution="2k", ratio=ratio, image_urls=refs)
+    log("[compose] image task submitted=%s" % task_id)
+    urls = br_client.wait_image_generation(api_key, task_id, interval=5, max_wait=900)
     if not urls:
         raise br_client.BRError("融合失败：平台未返回图像 URL")
     hosted = urls[0]
@@ -95,7 +98,7 @@ def compose_scene(human_path, scene_path, prompt, out_path=None,
     local = None
     if out_path:
         os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
-        br_client.download(hosted, out_path)
+        br_client.download(hosted, out_path, allow_nonpublic_peer=True)
         local = out_path
         log("[saved] %s" % local)
     return {"ok": True, "hosted_url": hosted, "local_path": local}

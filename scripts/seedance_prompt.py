@@ -21,7 +21,16 @@ _SAFE_ZONE_HINTS = {
 
 
 def is_seedance_model(model):
-    return str(model or "").lower() in SEEDANCE_MODELS
+    value = str(model or "").lower()
+    return value in SEEDANCE_MODELS or "seedance" in value
+
+
+def _uses_native_storyboard_prompt(segment, model):
+    mode = str((segment or {}).get("storyboard_ref_mode") or "").strip().lower()
+    if mode in ("expanded_panel", "single_panel", "single_shot_keyframe"):
+        return False
+    return (not mode or mode in ("native_storyboard", "contact_sheet", "storyboard_contact_sheet")) \
+        and is_seedance_model(model)
 
 
 def _clean(value):
@@ -48,7 +57,8 @@ def _reference_clause(ref, index):
         "continuation_frame": "只作为本段连续性起点，继承人物位置、动作状态、镜头方向和光线；不得当作整段固定构图或重置场景",
     }
     if ref_type in clauses:
-        line = "素材%d（%s）：%s。" % (index, ref.get("label", "参考图"), clauses[ref_type])
+        tag = ref.get("tag") or ("@ref%d" % index)
+        line = "%s（素材%d，%s）：%s。" % (tag, index, ref.get("label", "参考图"), clauses[ref_type])
         scope = ref.get("scope")
         if scope == "beat":
             line += " 此素材仅适用于指定镜头时间窗，不得扩大到其他镜头。"
@@ -92,7 +102,8 @@ def compile_prompt(segment, refs=None, *, style=None, negative=None, target_mode
     storyboard_ref = bool(segment.get("storyboard_ref") or segment.get("storyboard_ref_mode"))
     lines = []
     if storyboard_ref:
-        lines.append(_storyboard_rules_block())
+        lines.append(_storyboard_rules_block(
+            native=_uses_native_storyboard_prompt(segment, target_model)))
 
     # ── 核心指令（含模型标识用于调试区分）──
     model_label = "Kling" if is_kling else "Seedance 2.0"
@@ -117,6 +128,18 @@ def compile_prompt(segment, refs=None, *, style=None, negative=None, target_mode
             audio_parts.append("背景音乐：%s" % _clean(audio["bgm"]))
         if audio.get("sfx"):
             audio_parts.append("音效：%s" % _clean(audio["sfx"]))
+        if audio.get("voice_continuity"):
+            audio_parts.append("声音连续性：%s" % _clean(audio["voice_continuity"]))
+        if audio.get("bgm_continuity"):
+            audio_parts.append("BGM连续性：%s" % _clean(audio["bgm_continuity"]))
+        if audio.get("sfx_continuity"):
+            audio_parts.append("音效连续性：%s" % _clean(audio["sfx_continuity"]))
+        if audio.get("voice_continuity_method"):
+            audio_parts.append("声音连续性方法：%s" % _clean(audio["voice_continuity_method"]))
+        if audio.get("bgm_continuity_method"):
+            audio_parts.append("BGM连续性方法：%s" % _clean(audio["bgm_continuity_method"]))
+        if audio.get("media_reference_method"):
+            audio_parts.append("音频参考方式：%s" % _clean(audio["media_reference_method"]))
         if audio.get("lip_sync"):
             audio_parts.append("口型同步：必须")
         if audio_parts:
@@ -170,6 +193,15 @@ def _build_core_instruction(segment, timeline, duration, is_kling):
     lighting = _clean(first_beat.get("lighting") or segment.get("lighting") or "")
     scene = _clean(first_beat.get("scene_prompt") or segment.get("scene_prompt") or "")
 
+    # Bind the action to concrete input images in the same sentence. This is
+    # deliberately not a detached "reference list" that the model must map.
+    ref_tags = segment.get("ref_tags") or first_beat.get("ref_tags") or []
+    if isinstance(ref_tags, str):
+        ref_tags = [ref_tags]
+    inline_refs = " ".join(ref_tags)
+    if inline_refs:
+        action = "镜头%d，%s %s" % (int(segment.get("storyboard_panel_index") or 1), inline_refs, action)
+
     # Build the core instruction
     parts = []
     if is_kling:
@@ -200,6 +232,12 @@ def _build_core_instruction(segment, timeline, duration, is_kling):
             details.append("%s：%s" % (label, _clean(value)))
     if details:
         parts.append("；".join(details))
+    bindings = segment.get("reference_bindings") or []
+    if bindings:
+        parts.append("参考角色：" + "；".join(
+            "%s=%s，%s" % (item.get("tag"), item.get("role"),
+                           "必须可见" if item.get("must_be_visible") else "仅作环境锚定")
+            for item in bindings if item.get("tag")))
 
     # Environment and lighting (if not already in details)
     if scene and not any("场景" in d for d in details):
@@ -246,10 +284,24 @@ def _build_core_instruction(segment, timeline, duration, is_kling):
     return "。".join(p for p in parts if p) + "。"
 
 
-def _storyboard_rules_block():
+def _storyboard_rules_block(native=False):
     """Compact storyboard-to-video rules (always included when storyboard_ref=True)."""
-    return ("【故事板转视频规则】故事板是黑白素描预演，仅用于构图和动作顺序参考；"
+    if native:
+        return ("【Seedance 原生故事板转视频规则】输入的是客户确认过的最终多格故事板/contact sheet；"
+                "只执行当前 segment/panel index 对应镜头，但可以读取整张故事板里的前后镜头关系、构图递进、"
+                "动作节奏、机位变化、光线和情绪弧线，保证该片段展开后能与上下片段连贯剪接。"
+                "故事板是黑白素描预演，仅用于分镜、构图和动作顺序参考；成片必须是真实摄影质感的彩色商业视频，"
+                "绝不输出素描、铅笔画、炭笔画、故事板格子、分屏或面板边框。"
+                "标注颜色只用于读取导演意图：RED arrows = body / subject movement；BLUE arrows = camera movement；"
+                "GREEN marks = framing and composition notes；ORANGE marks = lighting direction；"
+                "PURPLE marks = sound and emotional emphasis；BLACK text = short shot notes and panel labels；"
+                "Do NOT render any arrows, marks, labels or notes. NEVER render the video as a sketch. "
+                "导演标注（红箭头=身体运动、蓝箭头=镜头运动、绿标记=构图、橙标记=灯光、紫标记=情绪）"
+                "必须读取并转译为真实运镜、动作和声音情绪，但绝不渲染标注本身。")
+    return ("【单镜头展开图转视频规则】输入的故事板参考图是当前镜头专属的单格展开图，不是整张多格故事板；"
+            "只生成该镜头一个清晰时刻，绝不推断或复现其他格。故事板是黑白素描预演，仅用于构图和动作顺序参考；"
             "成片必须是真实摄影质感的彩色商业视频，绝不输出素描、铅笔画、炭笔画或故事板格子画面。"
+            "NEVER render the video as a sketch, pencil drawing, charcoal drawing, storyboard panel, animatic, comic strip or grayscale previs."
             "导演标注（红箭头=身体运动、蓝箭头=镜头运动、绿标记=构图、橙标记=灯光、紫标记=情绪）"
             "必须读取并转译为真实运镜和动作，但绝不渲染标注本身。")
 
@@ -266,33 +318,6 @@ def _build_director_intent(segment):
     if not parts:
         return None
     return "导演意图：%s。所有运镜、灯光、表演和声音必须服务同一个意图。" % "；".join(parts)
-    if segment.get("continuity_in"):
-        lines.append("本段开头衔接：%s。" % _clean(segment["continuity_in"]))
-    if segment.get("continuity_out"):
-        lines.append("本段结尾衔接点：%s。下一段必须从该状态自然延续。" % _clean(segment["continuity_out"]))
-    if segment.get("extend_video"):
-        lines.insert(1, "这是上一段视频的延长：从上传视频最后画面自然继续，不重置人物、场景、镜头方向或光线。")
-    if segment.get("dialogue"):
-        lines.append("台词/旁白：%s。" % _clean(segment["dialogue"]))
-    audio = segment.get("audio_contract") or {}
-    if audio:
-        lines.append(
-            "音频执行契约：台词=%s；语言/口音=%s；声音人设=%s；背景音乐=%s；音效=%s；口型同步=%s。"
-            "这些是实际音画生成要求，不是备注；不得省略、替换语言或擅自改变声音人设。" % (
-                _clean(audio.get("dialogue") or "无"), _clean(audio.get("language") or "无指定"),
-                _clean(audio.get("voice") or "无指定"), _clean(audio.get("bgm") or "无"),
-                _clean(audio.get("sfx") or "无"), "必须" if audio.get("lip_sync") else "不要求"))
-    render_plan = (segment.get("render_plan") or {}).get("content") or {}
-    if render_plan:
-        lines.append("已确认渲染方案（必须实际执行）：%s。" % _clean(
-            __import__("json").dumps(render_plan, ensure_ascii=False, sort_keys=True)))
-    if style:
-        lines.append("参考风格描述（仅用于商业质感与色彩，不得改变写实摄影媒介）：%s。" % _clean(style))
-    lines.append("最终成片锁定：photorealistic live-action realistic commercial footage，真实彩色摄影质感；"
-                 "不得继承故事板的黑白、素描、铅笔或炭笔媒介。")
-    if negative:
-        lines.append("避免：%s。" % _clean(negative))
-    return "\n".join(lines)
 
 
 def _build_continuity_lock(segment):

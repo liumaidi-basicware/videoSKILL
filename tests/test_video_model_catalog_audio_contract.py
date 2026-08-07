@@ -24,6 +24,19 @@ class ModelCatalogTests(unittest.TestCase):
                 "kling-v3-omni-video", 5, dialogue="台词", formal=True,
                 reference_count=4), "kling-v3-omni-video")
 
+    def test_seedance_catalog_alias_supplies_integrated_audio_contract(self):
+        catalog = video_engine._normalize_model_catalog([{
+            "modelId": "dreamina-seedance-2-0-260128",
+            "modelName": "seedance-2.0",
+            "online": True,
+            "status": True,
+            "allowVideoType": [1, 2, 3, 5],
+        }])
+        with mock.patch.object(video_engine, "_model_catalog", return_value=catalog):
+            self.assertEqual(video_engine._pick_video_model(
+                "seedance-2.0", 5, dialogue="台词", formal=True),
+                "dreamina-seedance-2-0-260128")
+
     def test_normalizes_aliases_duplicates_and_json_capabilities(self):
         catalog = video_engine._normalize_model_catalog([
             {"modelId": "provider/seedance-v2", "modelName": "seedance-2.0",
@@ -73,7 +86,7 @@ class ModelCatalogTests(unittest.TestCase):
         catalog = video_engine._normalize_model_catalog([
             {"modelId": "wan/2.7", "modelName": "wan2.7-i2v", "online": True,
              "status": True, "allowVideoType": "[1,2]", "integratedAudio": False},
-            {"modelId": "mystery/video", "modelName": "seedance-2.0", "online": True,
+            {"modelId": "mystery/video", "modelName": "mystery-video", "online": True,
              "status": True, "allowVideoType": [1]},
         ])
         with mock.patch.object(video_engine, "_model_catalog", return_value=catalog):
@@ -107,11 +120,22 @@ class AudioContractTests(unittest.TestCase):
         }]}
         segment = script_splitter.split(
             plan, client="test", allow_unconfirmed=True)["segments"][0]
-        self.assertEqual(segment["audio_contract"], {
+        self.assertEqual({key: segment["audio_contract"][key] for key in (
+            "track", "speech", "dialogue", "language", "voice", "bgm", "sfx", "lip_sync")}, {
             "track": "required", "speech": True, "dialogue": "你好",
             "language": "zh-CN", "voice": "warm", "bgm": "light",
             "sfx": "click", "lip_sync": True,
         })
+        self.assertIn("voice_continuity", segment["audio_contract"])
+        self.assertIn("bgm_continuity", segment["audio_contract"])
+        self.assertIn("sfx_continuity", segment["audio_contract"])
+        self.assertEqual(segment["audio_contract"]["voice_continuity_method"],
+                         "text_contract_and_human_qc")
+        self.assertEqual(segment["audio_contract"]["bgm_continuity_method"],
+                         "post_mix_preferred")
+        self.assertEqual(
+            segment["audio_contract"]["media_reference_method"],
+            "basicrouter_video_v1_has_no_public_audio_reference_field")
 
     def test_audio_contract_is_handoff_bound(self):
         segment = {"id": "s1", "dialogue": "hello", "audio_contract": {

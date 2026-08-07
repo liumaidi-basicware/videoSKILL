@@ -107,6 +107,40 @@ else
   warn "常规安装失败，重试 --user…"
   "$PYBIN" -m pip install -q --user -r "$REQ_FILE" || { err "依赖安装失败，请检查网络（能否访问 PyPI）。"; exit 1; }
 fi
+# 在线路径装后断言：与离线路径的 SHA-256 树校验"殊途同验"——
+# 逐模块 import + 版本下限断言，装错版本/缺包立即失败，不把坏环境带到运行时。
+log "3b/8 在线安装后版本断言"
+"$PYBIN" - <<'PYEOF' || { err "依赖版本断言失败：安装结果与 requirements 不符"; exit 1; }
+import sys
+REQUIRED = [
+    ("pptx", "python-pptx", (0, 6, 21)),
+    ("docx", "python-docx", (0, 8, 11)),
+    ("fitz", "pymupdf", (1, 23, 0)),
+    ("openpyxl", "openpyxl", (3, 0, 0)),
+    ("imageio_ffmpeg", "imageio-ffmpeg", (0, 4, 9)),
+    ("static_ffmpeg", "static-ffmpeg", (2, 5, 0)),
+]
+failed = []
+for module, dist, minimum in REQUIRED:
+    try:
+        mod = __import__(module)
+    except ImportError as exc:
+        failed.append("%s 不可导入 (%s)" % (dist, exc))
+        continue
+    raw = getattr(mod, "__version__", None)
+    if raw:
+        try:
+            version = tuple(int(part) for part in raw.split(".")[:3] if part.isdigit())
+            if version and version < minimum:
+                failed.append("%s 版本 %s 低于下限 %s" % (dist, raw, ".".join(map(str, minimum))))
+        except (ValueError, AttributeError):
+            pass  # 版本号不可解析时不误判
+if failed:
+    for item in failed:
+        print("ASSERT-FAIL: %s" % item, file=sys.stderr)
+    sys.exit(1)
+print("依赖版本断言通过（%d 项）" % len(REQUIRED))
+PYEOF
 fi
 
 # ---------- 4. Node.js（HyperFrames 字幕/动效引擎需要）----------

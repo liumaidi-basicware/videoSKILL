@@ -117,7 +117,15 @@ DESIGN_PROMPT = """你是一位资深广告导演和动态图形设计师。请�
         "text": "精炼字幕文本（≤20字，无标点）",
         "position": "lower_third",
         "style": "subtitle",
-        "safe_zone": "lower_third"
+        "safe_zone": "lower_third",
+        "typography": {{
+          "role": "spoken|hook|proof|cta",
+          "size_px": 52,
+          "max_width_px": 1220,
+          "max_lines": 2,
+          "emphasis": ["需要强调的关键词"],
+          "preset": "fade_up|pop|slide_left|slide_right|none"
+        }}
       }},
       "motion_overlay": {{
         "style": "title_reveal|bullet_list|metric_pop|data_card|lower_third|keyword_flash|none",
@@ -127,6 +135,9 @@ DESIGN_PROMPT = """你是一位资深广告导演和动态图形设计师。请�
         "position": "center|top|bottom|lower_third|left|right|corner",
         "safe_zone": "center|upper_third|lower_third|corner|left|right",
         "timing": "进场0.5s后|全程|结尾强调",
+        "preset": "pop|slide_left|slide_right|fade_up|none",
+        "size_px": 42,
+        "width_px": 560,
         "reason": "为什么这里需要这个动效（一句话）"
       }},
       "video_safe_zones": ["lower_third"],
@@ -138,6 +149,10 @@ DESIGN_PROMPT = """你是一位资深广告导演和动态图形设计师。请�
 【硬性要求】
 - subtitle.text 不超过 20 字，去掉语气词和标点
 - 每个镜头最多 1 个字幕 + 1 个动效
+- 主字幕不是每镜头固定同一个字号：hook/cta 可放大，长台词必须缩小或分两行；字号必须在 38–72px（基于1920x1080）
+- 主字幕 max_width_px 必须在 680–1320px，禁止横贯全屏；卖点卡 width_px 必须在 320–620px
+- 相邻镜头不要连续使用同一个 preset；字幕与卖点卡应使用不同 track_index，避免互相遮挡
+- preset、字号、宽度和强调词必须能直接用于后期渲染，不能只写导演描述
 - 不需要动效的镜头 style 填 "none"
 - 口播镜头必须有 subtitle，非口播镜头可以没有
 - 数据类镜头（有 metric）优先用 data_card
@@ -158,6 +173,31 @@ def _validate_design(design, plan_shots):
         sid = shot.get("shot_id")
         sub = shot.get("subtitle") or {}
         overlay = shot.get("motion_overlay") or {}
+        typography = sub.get("typography") or {}
+        if typography:
+            size = typography.get("size_px", 52)
+            width = typography.get("max_width_px", 1100)
+            if not isinstance(size, (int, float)) or not 38 <= size <= 72:
+                raise ValueError("MOTION_DESIGN_INVALID: subtitle.typography.size_px 必须在38-72px")
+            if not isinstance(width, (int, float)) or not 680 <= width <= 1320:
+                raise ValueError("MOTION_DESIGN_INVALID: subtitle.typography.max_width_px 必须在680-1320px")
+            typography["size_px"] = int(size)
+            typography["max_width_px"] = int(width)
+            typography["max_lines"] = max(1, min(2, int(typography.get("max_lines", 2))))
+            if typography.get("preset") not in (None, "fade_up", "pop", "slide_left", "slide_right", "none"):
+                raise ValueError("MOTION_DESIGN_INVALID: subtitle.typography.preset 不受支持")
+        if overlay.get("size_px") is not None:
+            size = overlay.get("size_px")
+            if not isinstance(size, (int, float)) or not 30 <= size <= 56:
+                raise ValueError("MOTION_DESIGN_INVALID: motion_overlay.size_px 必须在30-56px")
+            overlay["size_px"] = int(size)
+        if overlay.get("width_px") is not None:
+            width = overlay.get("width_px")
+            if not isinstance(width, (int, float)) or not 320 <= width <= 620:
+                raise ValueError("MOTION_DESIGN_INVALID: motion_overlay.width_px 必须在320-620px")
+            overlay["width_px"] = int(width)
+        if overlay.get("preset") not in (None, "pop", "slide_left", "slide_right", "fade_up", "none"):
+            raise ValueError("MOTION_DESIGN_INVALID: motion_overlay.preset 不受支持")
         # Validate subtitle
         if sub.get("text") and len(sub["text"]) > 30:
             sub["text"] = sub["text"][:30]
@@ -174,7 +214,7 @@ def _validate_design(design, plan_shots):
     return design
 
 
-def design_from_plan(plan, api_key=None, model=None):
+def design_from_plan(plan, api_key=None, model=None, require_llm=False):
     """从定稿 storyboard_plan.json 生成 motion_design.json。
 
     使用 BasicRouter LLM 分析每镜内容，生成统一的动效设计规范。
@@ -200,49 +240,64 @@ def design_from_plan(plan, api_key=None, model=None):
     }
 
     # Try LLM-based design
+    llm_error = None
     if api_key:
-        design = _llm_design(plan_summary, api_key, model=model)
-        if design:
-            return _validate_design(design, shots)
+        try:
+            design, used_model = _llm_design(plan_summary, api_key, model=model)
+            validated = _validate_design(design, shots)
+            validated["design_engine"] = {"mode": "llm", "model": used_model}
+            return validated
+        except Exception as exc:
+            llm_error = str(exc)
+            if require_llm:
+                raise ValueError("MOTION_DESIGN_LLM_FAILED: %s" % exc) from exc
+    elif require_llm:
+        raise ValueError("MOTION_DESIGN_LLM_REQUIRED: 缺少 BasicRouter key")
 
     # Fallback: rule-based design (no LLM needed)
-    return _rule_based_design(plan_summary, shots)
+    fallback = _rule_based_design(plan_summary, shots)
+    fallback["design_engine"] = {
+        "mode": "rule_based",
+        "reason": llm_error or "api_key_unavailable",
+    }
+    return fallback
 
 
 def _llm_design(plan_summary, api_key, model=None):
     """Call BasicRouter LLM to generate motion design."""
     prompt = DESIGN_PROMPT.replace("{plan_json}", json.dumps(plan_summary, ensure_ascii=False, indent=2))
-    try:
-        models = br_client.list_models(api_key, category="text")
-        if not models:
-            return None
-        # Pick a capable text model
-        text_model = model
-        if not text_model:
-            for m in (models if isinstance(models, list) else []):
-                name = str(m.get("modelId") or m.get("modelName") or "").lower()
-                if any(k in name for k in ("kimi", "gpt", "claude", "qwen", "deepseek")):
-                    text_model = m.get("modelId") or m.get("modelName")
-                    break
-        if not text_model:
-            return None
-        result = br_client.chat(api_key, text_model, prompt)
-        if not result:
-            return None
-        # Extract JSON from response
-        text = str(result)
-        # Find JSON block
-        m = re.search(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)
+    models = br_client.list_models(category="text")
+    if not models:
+        raise ValueError("在线文本模型目录为空")
+    # Pick a capable text model
+    text_model = model
+    if not text_model:
+        for m in (models if isinstance(models, list) else []):
+            if m.get("online") is False or m.get("status") is False:
+                continue
+            name = str(m.get("modelId") or m.get("modelName") or m.get("id") or "")
+            if any(k in name.lower() for k in ("kimi", "gpt", "claude", "qwen", "deepseek")):
+                text_model = name
+                break
+    if not text_model:
+        raise ValueError("没有可用的字幕设计文本模型")
+    messages = [
+        {"role": "system", "content": "你只输出符合要求的 JSON 字幕与动效设计方案。"},
+        {"role": "user", "content": prompt},
+    ]
+    result = br_client.chat(api_key, messages, model=text_model, timeout=180)
+    if not result:
+        raise ValueError("字幕设计模型返回为空")
+    # Extract JSON from response
+    text = str(result)
+    m = re.search(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)
+    if m:
+        text = m.group(1)
+    else:
+        m = re.search(r"\{.*\}", text, re.DOTALL)
         if m:
-            text = m.group(1)
-        else:
-            # Try to find raw JSON
-            m = re.search(r"\{.*\}", text, re.DOTALL)
-            if m:
-                text = m.group(0)
-        return json.loads(text)
-    except Exception:
-        return None
+            text = m.group(0)
+    return json.loads(text), text_model
 
 
 def _rule_based_design(plan_summary, shots):
@@ -255,7 +310,8 @@ def _rule_based_design(plan_summary, shots):
         sid = shot.get("id")
         dialogue = shot.get("dialogue") or ""
         visual = shot.get("visual") or ""
-        has_product = shot.get("has_product", False)
+        has_product = bool(shot.get("has_product") or shot.get("product_sku")
+                           or shot.get("product_refs"))
         duration = shot.get("duration") or 5
 
         # Subtitle: extract from dialogue
@@ -407,7 +463,15 @@ def design_to_subtitle(shot_design, dialogue=""):
             text = re.sub(r"[。！？!?；;，,、\s]+", " ", dialogue).strip()[:20]
             return {"text": text, "position": "lower_third"} if text else None
         return None
-    return {"text": sub["text"], "position": sub.get("position", "lower_third")}
+    typography = sub.get("typography") or {}
+    result = {"text": sub["text"], "position": sub.get("position", "lower_third")}
+    for source, target in (("size_px", "size"), ("max_width_px", "width_px"),
+                           ("preset", "preset"), ("max_lines", "max_height_lines")):
+        if typography.get(source) is not None:
+            result[target] = typography[source]
+    if typography.get("emphasis"):
+        result["emphasis"] = typography["emphasis"]
+    return result
 
 
 # ── CLI ─────────────────────────────────────────────────────────────
@@ -420,6 +484,8 @@ def main(argv=None):
     dp.add_argument("--plan", required=True)
     dp.add_argument("--out", required=True)
     dp.add_argument("--model", help="LLM model for design generation")
+    dp.add_argument("--require-llm", action="store_true",
+                    help="模型不可用或返回无效时阻断，不允许静默退回规则模板")
 
     ip = sub.add_parser("inject", help="把动效设计注入 storyboard_plan")
     ip.add_argument("--plan", required=True)
@@ -432,11 +498,13 @@ def main(argv=None):
         with open(args.plan, encoding="utf-8") as f:
             plan = json.load(f)
         api_key = key_setup.load_key()
-        design = design_from_plan(plan, api_key=api_key, model=args.model)
+        design = design_from_plan(plan, api_key=api_key, model=args.model,
+                                  require_llm=args.require_llm)
         with open(args.out, "w", encoding="utf-8") as f:
             json.dump(design, f, ensure_ascii=False, indent=2)
         print(json.dumps({"ok": True, "out": args.out,
-                          "shots": len(design.get("shots", []))}, ensure_ascii=False))
+                          "shots": len(design.get("shots", [])),
+                          "design_engine": design.get("design_engine")}, ensure_ascii=False))
         return 0
 
     if args.cmd == "inject":

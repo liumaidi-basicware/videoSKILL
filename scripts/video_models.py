@@ -180,10 +180,11 @@ def _resolve_catalog_model(value, catalog):
 
 
 def _is_kling_video_model(model):
-    if "kling-v3-omni" in str(model or "").lower():
-        return True
-    record = _model_catalog("video").get("records", {}).get(model) or {}
-    return any("kling-v3-omni" in alias.lower() for alias in record.get("aliases", set()))
+    # This helper is used while compiling local prompt previews and must stay
+    # side-effect free. Model catalog lookups happen in _pick_video_model; a
+    # boolean naming check must not trigger network retries in offline tests or
+    # customer confirmation gates.
+    return "kling" in str(model or "").lower()
 
 
 def _available_models_set(category="video"):
@@ -209,6 +210,23 @@ def _model_supports_type(model, video_type):
     if caps is None:
         return False
     return int(video_type) in caps
+
+
+def _model_integrated_audio(model_id, record=None):
+    candidates = [model_id]
+    if record:
+        candidates.extend(record.get("aliases") or [])
+        candidates.extend(record.get("submission_names") or [])
+    for name in candidates:
+        value = VIDEO_MODEL_INTEGRATED_AUDIO.get(str(name))
+        if value is not None:
+            return value
+    lowered = " ".join(str(name).lower() for name in candidates)
+    if "seedance" in lowered or "kling-v3-omni" in lowered:
+        return True
+    if "wan" in lowered:
+        return False
+    return None
 
 
 def _pick_video_model(preferred=None, video_type=None, dialogue=None, formal=False,
@@ -241,12 +259,12 @@ def _pick_video_model(preferred=None, video_type=None, dialogue=None, formal=Fal
                 int(reference_count) <= int(record["image_count"]))
             integrated_audio = record["integrated_audio"]
             if integrated_audio is None:
-                integrated_audio = VIDEO_MODEL_INTEGRATED_AUDIO.get(model_id)
+                integrated_audio = _model_integrated_audio(model_id, record)
             eligible = (record["active"] and not record["conflict"] and
                         supports_type and supports_reference_count)
         else:
             eligible = _model_supports_type(model_id, video_type)
-            integrated_audio = VIDEO_MODEL_INTEGRATED_AUDIO.get(model_id)
+            integrated_audio = _model_integrated_audio(model_id)
             if available:
                 eligible = eligible and model_id in available
         if eligible and not (formal and dialogue and integrated_audio is not True):

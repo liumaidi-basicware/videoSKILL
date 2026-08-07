@@ -121,13 +121,23 @@ class FormalSingleAndFallbackTests(unittest.TestCase):
             manifest_path = os.path.join(directory, "manifest.json")
             with open(manifest_path, "w", encoding="utf-8") as handle:
                 json.dump(manifest, handle)
+            prompt_review_path = os.path.join(directory, "prompt_review.json")
+            with open(prompt_review_path, "w", encoding="utf-8") as handle:
+                json.dump({"status": "confirmed", "stage": "video",
+                           "prompts": [{"shot_id": "s1", "prompt_zh": "real",
+                                        "submission_prompt_zh": "real",
+                                        "model": "seedance-2.0",
+                                        "model_submission_prompts": {
+                                            "seedance-2.0": "real"}}]},
+                          handle)
             with mock.patch.object(ve, "_pick_video_model", return_value="seedance-2.0"), \
                     mock.patch.object(ve, "render_batch", return_value=[{
                         "ok": True, "videoUrl": "https://x/v.mp4", "localPath": segment["out_path"]
                     }]) as render_batch, contextlib.redirect_stdout(io.StringIO()):
                 code = ve.main(["--text", "forged", "--client", "acme",
                                 "--manifest", manifest_path, "--results-out",
-                                os.path.join(directory, "results.json")])
+                                os.path.join(directory, "results.json"),
+                                "--prompt-review", prompt_review_path])
             self.assertEqual(code, 0)
             self.assertEqual(render_batch.call_args.args[0][0], segment)
 

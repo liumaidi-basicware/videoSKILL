@@ -91,7 +91,18 @@ python3 -m pytest tests/ -v
 python3 tests/test_storyboard_enhancements.py
 python3 tests/test_v13.py tests/test_v14.py tests/test_v15.py
 
-# 快速冒烟（核心 5 个）
-python3 tests/test_v13.py tests/test_v14.py tests/test_v15.py \
-  tests/test_storyboard_enhancements.py tests/test_key_setup.py
+# 快速冒烟（核心流程 + 近期 incident 回归）
+bash tests/run_tests.sh smoke
+
+# 分组/全量入口（推荐）
+bash tests/run_tests.sh smoke          # 冒烟
+bash tests/run_tests.sh storyboard     # 任一分组
+bash tests/run_tests.sh all            # 全量 57 个
 ```
+
+## CI 与用例数下限断言
+
+- CI：`.github/workflows/ci.yml`，push/PR 触发，matrix Python 3.11/3.13，执行 `bash tests/run_tests.sh all`（无需任何密钥，全部用例为离线 mock）。
+- `run_tests.sh` 逐文件以 `python3 -m unittest tests.<模块>` 运行（即使文件缺 `unittest.main()` 入口也不会静默空跑），并汇总每个文件输出中的 `Ran N tests`。
+- 下限断言（防"假绿"）：`smoke` 模式下，匹配文件数 < 15 或用例总数 < 170 时失败；`all` 模式下，匹配文件数 < 40 或用例总数 < 400 时失败并打印 `TEST COUNT BELOW FLOOR — possible silent skip`；任一文件失败同样非零退出。当前 all 基线：57 文件 / 515 用例。
+- 未来新增硬依赖密钥/网络的测试，在 `run_tests.sh` 的 `env_skip_reason()` 登记，缺依赖时显式 SKIP（非静默），设 `FORCE_RUN_NETWORK_TESTS=1` 可强制运行。

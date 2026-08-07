@@ -263,14 +263,16 @@ def gen_view(client, sku, view, prompt=None, ref=None,
           "image_urls": image_urls}
     if model:
         kw["model"] = model
-    urls1 = br_client.create_image(k, full_prompt, **kw)
+    task1 = br_client.create_image_generation(k, full_prompt, **kw)
+    print("[product-library] view %s task submitted: %s" % (view, task1), flush=True)
+    urls1 = br_client.wait_image_generation(k, task1, interval=5, max_wait=900)
     if not urls1:
         raise SystemExit("gen_view: API returned no image")
 
     vdir = os.path.join(_sku_dir(client, sku), "views")
     os.makedirs(vdir, exist_ok=True)
     dest1 = os.path.join(vdir, "%s_v1.png" % view)
-    br_client.download(urls1[0], dest1)
+    br_client.download(urls1[0], dest1, allow_nonpublic_peer=True)
 
     if not refine:
         return {"view": view, "pass1": dest1, "pass2": None,
@@ -279,10 +281,13 @@ def gen_view(client, sku, view, prompt=None, ref=None,
     # 版本 B：用同一 prompt/同参考图独立再生成一版（平行候选，非 v1 的精修）
     dest2 = None
     try:
-        urls2 = br_client.create_image(k, full_prompt, **kw)
+        task2 = br_client.create_image_generation(k, full_prompt, **kw)
+        print("[product-library] view %s variant task submitted: %s" %
+              (view, task2), flush=True)
+        urls2 = br_client.wait_image_generation(k, task2, interval=5, max_wait=900)
         if urls2:
             dest2 = os.path.join(vdir, "%s_v2.png" % view)
-            br_client.download(urls2[0], dest2)
+            br_client.download(urls2[0], dest2, allow_nonpublic_peer=True)
     except Exception:
         dest2 = None
 

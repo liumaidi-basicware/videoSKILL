@@ -17,8 +17,8 @@ brief.json -> storyboard_plan.json -> storyboard_result.json
 
 1. 本地模型提炼目标、受众、核心动作和情绪弧线。
 2. 审计人物、产品、场景和关键状态的素材覆盖率。
-3. 校验并生成 16:9、4x3、12 格黑白预演故事板。
-4. 每段只设置一个主导运镜，编译 Seedance 原生时间节点 prompt。
+3. 校验并生成 16:9、格数由 `shots[]` 决定的黑白预演故事板。
+4. 每段只设置一个主导运镜，编译 Seedance 原生故事板/时间节点 prompt；Kling fallback 才使用单格展开图。
 5. 先提交全部独立片段并统一轮询；需要连续性时使用 `--chain`。
 6. 执行 OCR、画面质量、人物/产品一致性和音频确认。
 7. 用 Remotion、HyperFrames 和 ffmpeg 完成本地可控的编排与文字层。

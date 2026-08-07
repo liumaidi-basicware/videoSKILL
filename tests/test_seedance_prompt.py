@@ -58,6 +58,7 @@ class SeedancePromptTests(unittest.TestCase):
 
     def test_model_detection(self):
         self.assertTrue(seedance_prompt.is_seedance_model("seedance-2.0"))
+        self.assertTrue(seedance_prompt.is_seedance_model("dreamina-seedance-2-0-260128"))
         self.assertFalse(seedance_prompt.is_seedance_model("kling-v3-omni-video"))
 
 

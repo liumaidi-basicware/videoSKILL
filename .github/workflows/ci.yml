@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # 部分依赖可能需离线资产，安装失败不阻塞（测试本身不依赖未装包时会真实失败并报红）
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+        continue-on-error: true
+
+      # 无 BASICROUTER_API_KEY 环境；run_tests.sh all 含用例数下限断言，静默空跑会报红
+      - name: Run full test suite
+        run: bash tests/run_tests.sh all

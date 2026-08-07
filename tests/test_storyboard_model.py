@@ -62,6 +62,41 @@ class StoryboardModelTests(unittest.TestCase):
             self.assertEqual(plan["asset_refs"]["product_images"], [image_path])
             self.assertEqual(plan["product_type"], "耳机")
 
+    def test_authored_raw_product_refs_are_removed_when_confirmed_anchors_exist(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            client_dir = os.path.join(directory, "assets", "momax")
+            image_dir = os.path.join(client_dir, "images")
+            raw_dir = os.path.join(client_dir, "product_images")
+            os.makedirs(image_dir)
+            os.makedirs(raw_dir)
+            confirmed_path = os.path.join(image_dir, "hero.png")
+            raw_path = os.path.join(raw_dir, "raw.png")
+            with open(confirmed_path, "wb") as handle:
+                handle.write(b"confirmed")
+            with open(raw_path, "wb") as handle:
+                handle.write(b"raw")
+            brief = {"client": "momax", "images": [{
+                "path": "assets/momax/images/hero.png",
+                "tag": "hero",
+                "status": "confirmed",
+                "via": "standardize",
+                "model": "gpt-image-2",
+            }]}
+            plan = {"client": "momax", "asset_refs": {
+                "product_images": [
+                    "assets/momax/images/hero.png",
+                    "assets/momax/product_images/raw.png",
+                ]}}
+
+            with mock.patch.object(storyboard, "ROOT", directory), \
+                 mock.patch("asset_prep.ROOT", directory), \
+                 mock.patch("asset_prep.ASSETS", os.path.join(directory, "assets")), \
+                 mock.patch("asset_prep._load_brief", return_value=brief):
+                hydrated = storyboard._hydrate_plan_asset_refs(plan)
+
+            self.assertEqual(hydrated["asset_refs"]["product_images"], [confirmed_path])
+
 
 if __name__ == "__main__":
     unittest.main()

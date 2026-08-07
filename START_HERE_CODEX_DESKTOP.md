@@ -31,7 +31,7 @@ marketing-video-agent/
 如果 Codex Desktop 没有识别 slash prompt，请直接输入下面这句话：
 
 ```text
-请读取 .codex/prompts/basicrouter-video.md，并严格按照里面的流程执行。先检查环境和 API Key，然后引导我确定 client、品牌、素材、数字人、剧本、完整分镜。保持顾问式共创，不要一次性问长表单；但在脚本和逐段分镜定稿后，请参考 references/professional-storyboard-enrichment.md，把每段 storyboard_plan.json 补齐景别、运镜、角度偏移、构图、光线、微表情、角色动作、场景/道具资产提示词和音频连续性。然后必须实际运行 scripts/storyboard.py 调用 gpt-image-2 生成人物板和每段视频的16:9、4x3、12格黑白故事板。脚本会返回本次会话独立的 output/storyboard/<run-id>/ 目录；请把返回 JSON 里的 storyboard_index.md / storyboard_preview.html / storyboard_embedded.md 展示给我确认，确认后才允许生成视频。若是两段或多段视频拼接，必须保持背景、人物形象、人物声音和 BGM 氛围一致，同时仍遵守 30°–50° 角度偏移 / 远中近特写跨度原则。
+请读取 .codex/prompts/basicrouter-video.md，并严格按照里面的流程执行。先检查环境和 API Key，然后引导我确定 client、品牌、素材、数字人、剧本、完整分镜。保持顾问式共创，不要一次性问长表单；但在脚本和逐段分镜定稿后，请参考 references/professional-storyboard-enrichment.md，把 storyboard_plan.json 的每个 shot 补齐景别、运镜、角度偏移、构图、光线、微表情、角色动作、场景/道具资产提示词和音频连续性。然后必须实际运行 scripts/storyboard.py 调用 gpt-image-2 生成人物板和 16:9、格数由 shots[] 数量决定的黑白故事板。脚本会返回本次会话独立的 output/storyboard/<run-id>/ 目录；请把返回 JSON 里的 storyboard_index.md / storyboard_preview.html / storyboard_embedded.md 展示给我确认，确认后才允许生成视频。若是两段或多段视频拼接，必须保持背景、人物形象、人物声音和 BGM 氛围一致，同时仍遵守 30°–50° 角度偏移 / 远中近特写跨度原则。
 ```
 
 ## 分镜图片没显示怎么办
@@ -72,9 +72,9 @@ output/storyboard/<run-id>/storyboard_embedded.md
 
 HTML 和 embedded markdown 都把图片直接内嵌进去，通常比本地路径更容易在 Codex Desktop 里显示。
 
-## 用 16:9、4x3、12 格故事板生成视频时
+## 用确认故事板生成视频时
 
-客户确认某段 `shot_*.jpg` 16:9、4x3、12 格故事板后，Codex 生成该段视频必须使用这张最终故事板作为主要视觉参考，并开启：
+客户确认 `shot_*.jpg` 故事板后，Codex 生成视频必须开启 `--storyboard-ref`。Seedance 可使用原生故事板/contact sheet 能力；只有回落 Kling 时才自动生成当前镜头的 16:9 单格展开图：
 
 ```bash
 python3 scripts/video_engine.py \
@@ -102,4 +102,4 @@ python3 scripts/video_engine.py \
 }
 ```
 
-硬性要求：使用上传的最终 16:9、4x3、12 格故事板作为主要视觉参考；严格保持角色/产品/场景/光线/故事顺序一致；不要整图生成，不要把 12 格当作一张图动画化；必须按照第 1 格到第 12 格分镜顺序生成连续视频；不要添加额外角色；不要改变剧情、服装、道具、产品外观和场景关系。
+硬性要求：逐 shot 独立生成；Seedance 路径明确当前 segment/panel_index 并利用前后镜头关系保持连贯；Kling 路径只使用当前镜头的单格展开图，不让 Kling 误读整张多格故事板；严格保持角色/产品/场景/光线/故事顺序、普通话声音人设、BGM 氛围和 SFX 强弱一致；不要添加额外角色；不要改变剧情、服装、道具、产品外观和场景关系。

@@ -132,7 +132,7 @@ class StandardizeTests(unittest.TestCase):
             shutil.rmtree(client_dir, ignore_errors=True)
 
     @staticmethod
-    def _fake_download(url, dest):
+    def _fake_download(url, dest, **_kwargs):
         with open(dest, "wb") as f:
             f.write(b"png")
 
@@ -167,6 +167,70 @@ class StandardizeTests(unittest.TestCase):
         brief = asset_prep._load_brief(self.client)
         self.assertEqual(len(brief["images"]), 1)
         self.assertEqual(brief["images"][0]["status"], "pending")
+
+    def test_create_one_uses_async_retrieve_without_changing_default_model(self):
+        captured = {}
+
+        def fake_create(api_key, text, model=None, **kwargs):
+            captured["api_key"] = api_key
+            captured["text"] = text
+            captured["model"] = model
+            captured["kwargs"] = kwargs
+            return "img_task_1"
+
+        with mock.patch.object(br_client, "create_image",
+                               side_effect=AssertionError("legacy sync path used")), \
+             mock.patch.object(br_client, "create_image_generation",
+                               side_effect=fake_create), \
+             mock.patch.object(br_client, "wait_image_generation",
+                               return_value=["https://cdn/a.png"]):
+            url = asset_prep._create_one(
+                "sk-test", "prompt", ["ref"], "1:1", "2k", None)
+
+        self.assertEqual(url, "https://cdn/a.png")
+        self.assertEqual(captured["model"], "seedream-5.0")
+        self.assertEqual(captured["kwargs"]["image_urls"], ["ref"])
+        self.assertEqual(captured["kwargs"]["ratio"], "1:1")
+        self.assertEqual(captured["kwargs"]["resolution"], "2k")
+
+    def test_clean_image_uses_gpt_image_2_async_cleanup(self):
+        captured = {}
+
+        def fake_create(api_key, text, model=None, **kwargs):
+            captured["model"] = model
+            captured["kwargs"] = kwargs
+            return "img_cleanup"
+
+        self._patch_common()
+        with mock.patch.object(br_client, "create_image_generation",
+                               side_effect=fake_create):
+            result = asset_prep.clean_image(
+                self.client, self.tmp_img, "清洗成白底产品图")
+
+        self.assertEqual(captured["model"], "gpt-image-2")
+        self.assertEqual(captured["kwargs"]["image_urls"],
+                         ["data:image/png;base64,x"])
+        self.assertEqual(result["via"], "clean_image")
+        self.assertEqual(result["status"], "pending")
+
+    def test_cutout_uses_async_image_generation_result_download(self):
+        captured = {}
+
+        def fake_create(api_key, text, model=None, **kwargs):
+            captured["model"] = model
+            captured["kwargs"] = kwargs
+            return "img_cutout"
+
+        self._patch_common()
+        with mock.patch.object(br_client, "create_image_generation",
+                               side_effect=fake_create):
+            result = asset_prep.cutout(self.client, self.tmp_img)
+
+        self.assertEqual(captured["model"], "kling-v3-omni-image")
+        self.assertEqual(captured["kwargs"]["image_urls"],
+                         ["data:image/png;base64,x"])
+        self.assertEqual(result["tag"], "cutout")
+        self.assertEqual(result["status"], "pending")
 
     def test_source_cleanup_rejects_non_gpt_image_model(self):
         self._patch_common()

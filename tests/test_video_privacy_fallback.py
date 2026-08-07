@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
+import json
 import os
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -8,6 +10,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
 import br_client  # noqa: E402
+import storyboard_enhancements  # noqa: E402
 import video_engine as ve  # noqa: E402
 import video_models  # noqa: E402
 
@@ -103,6 +106,124 @@ class VideoPrivacyFallbackTests(unittest.TestCase):
         self.assertEqual(results[0]["fallback_reason"], "reference_real_person_privacy")
         self.assertEqual(results[0]["model"], "kling-v3-omni-video")
         self.assertEqual(results[1]["retry_count"], 0)
+
+    def test_batch_storyboard_privacy_fallback_keeps_confirmed_panel_for_kling(self):
+        submissions = []
+
+        def create(_key, segment, model, video_type, ref_urls, negative_prompt, **kwargs):
+            submissions.append({
+                "segment": segment,
+                "model": model,
+                "video_type": video_type,
+                "ref_urls": ref_urls,
+                "negative_prompt": negative_prompt,
+                "kwargs": kwargs,
+            })
+            if len(submissions) == 1:
+                raise br_client.BRVideoReferencePrivacyError(PRIVACY_MESSAGE)
+            return "task-2", "prompt"
+
+        with tempfile.TemporaryDirectory() as root:
+            sheet = os.path.join(root, "sheet.jpg")
+            panel = os.path.join(root, "panel.jpg")
+            for path in (sheet, panel):
+                with open(path, "wb") as handle:
+                    handle.write(b"image")
+            def fake_recipe(item):
+                return {
+                    "id": item.get("id"),
+                    "storyboard_ref": bool(item.get("storyboard_ref")),
+                    "storyboard_panel_index": item.get("storyboard_panel_index"),
+                    "ref_tags": list(item.get("ref_tags") or []),
+                }
+
+            with mock.patch.object(ve.artifact_contract, "build_storyboard_panel_recipe", side_effect=fake_recipe):
+                def pick(preferred=None, **_kwargs):
+                    return preferred or "seedance-2.0"
+
+                recipe_sha = ve.artifact_contract.sha256_json(fake_recipe({
+                    "id": "s1",
+                    "storyboard_ref": True,
+                    "storyboard_panel_index": 1,
+                    "ref_tags": ["@product"],
+                }))
+                panel_sha = ve.artifact_contract.file_sha256(panel)
+                segment = {
+                    "id": "s1",
+                    "text": "hello",
+                    "dialogue": "hello",
+                    "approved_submission_prompt_zh": "hello",
+                    "storyboard_ref": True,
+                    "storyboard_ref_mode": "native_storyboard",
+                    "storyboard_path": sheet,
+                    "storyboard_dir": root,
+                    "storyboard_panel_index": 1,
+                    "storyboard_url": "https://cdn.example/storyboard.png",
+                    "storyboard_panel": {
+                        "path": panel,
+                        "url": "https://cdn.example/panel.png",
+                        "sha256": panel_sha,
+                        "recipe_sha256": recipe_sha,
+                        "panel_index": 1,
+                        "ref_tags": ["@product"],
+                    },
+                    "storyboard_panel_approval": {
+                        "status": "confirmed",
+                        "recipe_sha256": recipe_sha,
+                        "panel_sha256": panel_sha,
+                        "qa_method": "manual_human_review",
+                    },
+                    "panel_quality": {
+                        "pass": True,
+                        "method": "manual_human_review",
+                        "issues": [],
+                    },
+                    "ref_tags": ["@product"],
+                    "references": [{"tag": "@product", "url": "https://cdn.example/product.png"}],
+                    "video_type": 5,
+                    "duration": 4,
+                    "urls": ["https://cdn.example/product.png"],
+                    "out_path": os.path.join(root, "video.mp4"),
+                }
+                handoff = ve.artifact_contract.build_video_handoff(segment)["fingerprint"]
+                segment["video_handoff_fingerprint"] = handoff
+                manifest = {"client": "acme", "handoffs": {"video": {"segments": {"s1": handoff}}}}
+                results_out = os.path.join(root, "results.json")
+                manifest_path = os.path.join(root, "run_manifest.json")
+                prompt_review = os.path.join(root, "prompt_review.json")
+                with open(prompt_review, "w", encoding="utf-8") as handle:
+                    json.dump({
+                        "status": "confirmed",
+                        "stage": "video",
+                        "prompts": [{"shot_id": "s1", "submission_prompt_zh": "hello"}],
+                    }, handle)
+                with mock.patch.object(ve.key_setup, "load_key", return_value="sk-test"), \
+                     mock.patch.object(ve._rm, "identity_gate", return_value=None), \
+                     mock.patch.object(ve._rm, "generation_gate", return_value=None), \
+                     mock.patch.object(ve._rm, "save_manifest", return_value=None), \
+                     mock.patch.object(ve, "_manifest_handoff_matches", return_value=True), \
+                     mock.patch.object(ve, "_trusted_remote_segment_reference", return_value=True), \
+                     mock.patch.object(ve, "_reference_is_trusted", return_value=True), \
+                     mock.patch.object(ve, "_validate_references", return_value=None), \
+                     mock.patch.object(storyboard_enhancements, "stale_artifacts", return_value={"ok": True, "stale": []}), \
+                     mock.patch.object(ve, "_require_confirmed_prompt_review", return_value=None), \
+                     mock.patch.object(ve, "_pick_video_model", side_effect=pick), \
+                     mock.patch.object(ve, "_submit_video", side_effect=create), \
+                     mock.patch.object(ve, "_download_completed_video", return_value=segment["out_path"]), \
+                     mock.patch.object(ve, "_media_qc_guard", return_value={"passed": True, "media": {"actual_duration": 4}, "report_path": None}), \
+                     mock.patch.object(ve, "_ocr_guard", return_value=None), \
+                     mock.patch.object(ve.br_client, "get_video", return_value={
+                         "status": "succeeded", "videoUrl": "https://x/video.mp4"}), \
+                     mock.patch("time.sleep"):
+                    results = ve.render_batch([segment], client="acme", verbose=False, draft=False,
+                                              manifest=manifest, manifest_path=manifest_path,
+                                              results_out=results_out, prompt_review=prompt_review)
+        self.assertTrue(results[0]["ok"])
+        self.assertEqual([item["model"] for item in submissions],
+                         ["seedance-2.0", "kling-v3-omni-video"])
+        self.assertEqual(submissions[1]["segment"]["storyboard_ref_mode"], "expanded_panel")
+        self.assertEqual(submissions[1]["segment"]["storyboard_panel_approval"]["status"], "confirmed")
+        self.assertTrue(submissions[1]["segment"]["panel_quality"]["pass"])
 
     def test_chain_fallback_keeps_tail_refs_and_extend_url(self):
         submissions = []

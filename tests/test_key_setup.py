@@ -31,6 +31,14 @@ class KeySetupTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
             self.assertIsNone(key_setup.load_key("agent-b-session"))
 
+    def test_load_does_not_require_writable_lock_directory(self):
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            key_setup.save_key("sk-read-only")
+            with mock.patch.object(
+                    key_setup, "FileLock",
+                    side_effect=PermissionError("read-only session cache")):
+                self.assertEqual(key_setup.load_key(), "sk-read-only")
+
     def test_missing_session_does_not_read_global_key(self):
         with mock.patch.dict(os.environ, {"BASICROUTER_API_KEY": "sk-global"}, clear=True):
             self.assertIsNone(key_setup.load_key())
@@ -58,6 +66,26 @@ class KeySetupTests(unittest.TestCase):
             second = key_setup.ensure_session_id("different-host-session")
         self.assertEqual(first, second)
         self.assertTrue(first.startswith("br-"))
+
+    def test_project_fallback_is_agent_independent(self):
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(key_setup.agent_runtime, "detect_agent_runtime",
+                                  side_effect=[{"name": "codex"}, {"name": "kilo"}]):
+            first = key_setup.ensure_session_id()
+            os.environ.pop(key_setup.SESSION_ENV, None)
+            second = key_setup.ensure_session_id()
+        self.assertEqual(first, second)
+        self.assertTrue(first.startswith("br-project-"))
+
+    def test_new_project_session_reads_legacy_runtime_key(self):
+        project_session = "br-project-session"
+        legacy = key_setup._legacy_session_ids()[0]
+        with mock.patch.dict(os.environ, {key_setup.SESSION_ENV: project_session}, clear=False):
+            legacy_path = key_setup.session_key_path(legacy)
+            os.makedirs(os.path.dirname(legacy_path), exist_ok=True)
+            with open(legacy_path, "w") as handle:
+                handle.write("sk-legacy")
+            self.assertEqual(key_setup.load_key(), "sk-legacy")
 
     def test_get_masks_key_and_stdin_save_avoids_argv_secret(self):
         with mock.patch.dict(os.environ, self.env, clear=False), \

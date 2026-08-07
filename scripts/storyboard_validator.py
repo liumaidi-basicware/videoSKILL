@@ -19,9 +19,15 @@ TEXT_IN_FRAME = re.compile(
 )
 WEAK_VISUAL = re.compile(r"高级感|好看|震撼|电影感|氛围感|premium|cinematic", re.I)
 REFERENCE_TYPES = {"character_identity", "product_identity", "scene_environment",
-                   "storyboard_composition", "continuation_frame", "generic_visual"}
+                   "storyboard_composition", "continuation_frame", "generic_visual",
+                   "character_board", "product_board", "product_usage_identity"}
 REFERENCE_SCOPES = {"global", "scene", "clip", "beat"}
 DIRECTOR_FIELDS = ("narrative_function", "felt_intent", "director_voice", "arc_position")
+# 2026-08-05 修订：格数不再固定为12，由剧本分镜数量决定。建议区间 4-12
+# （少于4通常说明分镜切得太粗，超过12建议拆成多段视频，见 AGENTS.md 铁律#4）。
+MIN_PANEL_COUNT = 4
+MAX_PANEL_COUNT = 12
+TAG_PATTERN = re.compile(r"^@[a-z][a-z0-9_]*$")
 
 
 def validate_plan(plan):
@@ -72,10 +78,16 @@ def validate_plan(plan):
         else:
             warnings.append("shot %s 缺少 duration，出片前需要补齐镜头时长" % sid)
         panel_plan = shot.get("panel_plan") or shot.get("twelve_panel_plan") or []
-        if len(panel_plan) != 12:
-            errors.append("shot %s 必须包含 12 个 panel_plan 项" % sid)
+        if not panel_plan:
+            errors.append("shot %s 缺少 panel_plan（格数由剧本分镜数量决定，不能为空）" % sid)
+        elif not (MIN_PANEL_COUNT <= len(panel_plan) <= MAX_PANEL_COUNT):
+            warnings.append(
+                "shot %s 的 panel_plan 有 %d 项，建议区间 %d-%d 格（少于%d通常说明分镜切得太粗，"
+                "超过%d建议拆成多段视频），禁止为了凑数而拆分/合并分镜"
+                % (sid, len(panel_plan), MIN_PANEL_COUNT, MAX_PANEL_COUNT,
+                   MIN_PANEL_COUNT, MAX_PANEL_COUNT))
         if shot.get("nine_panel_plan"):
-            errors.append("shot %s 使用了旧的 nine_panel_plan，必须改为 12 项 panel_plan" % sid)
+            errors.append("shot %s 使用了旧的 nine_panel_plan 字段，请统一改用 panel_plan" % sid)
         for field in REQUIRED_SHOT_FIELDS:
             if not shot.get(field):
                 warnings.append("shot %s 缺少 %s" % (sid, field))
@@ -94,8 +106,9 @@ def validate_plan(plan):
         unknown = [ref for ref in refs if ref not in character_ids]
         if unknown:
             errors.append("shot %s 引用了不存在的角色: %s" % (sid, ", ".join(map(str, unknown))))
-        if len(panel_plan) == 12 and len(set(map(str, panel_plan))) < 12:
-            warnings.append("shot %s 的 12 格 panel_plan 存在重复描述，建议每格对应明确的动作或机位变化" % sid)
+        if len(panel_plan) >= 2 and len(set(map(str, panel_plan))) < len(panel_plan):
+            warnings.append("shot %s 的 panel_plan 存在重复描述，建议每格对应明确的动作或机位变化" % sid)
+        known_tags = set()
         for ref_index, ref in enumerate(shot.get("references") or [], 1):
             if not isinstance(ref, dict) or not ref.get("url"):
                 errors.append("shot %s references[%d] 必须是含 url 的对象" % (sid, ref_index))
@@ -104,6 +117,23 @@ def validate_plan(plan):
                 warnings.append("shot %s references[%d] 使用未知 type: %s" % (sid, ref_index, ref["type"]))
             if ref.get("scope") and ref["scope"] not in REFERENCE_SCOPES:
                 errors.append("shot %s references[%d] scope 非法: %s" % (sid, ref_index, ref["scope"]))
+            tag = ref.get("tag")
+            if tag:
+                if not TAG_PATTERN.match(str(tag)):
+                    errors.append("shot %s references[%d] 的 tag 格式非法: %s（须匹配 ^@[a-z][a-z0-9_]*$）"
+                                   % (sid, ref_index, tag))
+                else:
+                    known_tags.add(str(tag))
+            else:
+                warnings.append("shot %s references[%d] 缺少 tag，无法在 prompt 中内联引用" % (sid, ref_index))
+        ref_tags = shot.get("ref_tags") or []
+        if isinstance(ref_tags, str):
+            ref_tags = [ref_tags]
+        unknown_tags = [t for t in ref_tags if t not in known_tags]
+        if unknown_tags:
+            errors.append("shot %s 的 ref_tags 引用了不存在的参考图标签: %s（需先在 references[].tag 中定义）"
+                           % (sid, ", ".join(map(str, unknown_tags))))
+
         contract = shot.get("clip_contract")
         if contract is not None:
             if not isinstance(contract, dict):
@@ -122,8 +152,11 @@ def validate_plan(plan):
         for field in DIRECTOR_FIELDS:
             if not shot.get(field):
                 warnings.append("shot %s 缺少导演意图字段 %s" % (sid, field))
+    panel_counts = [len(shot.get("panel_plan") or shot.get("twelve_panel_plan") or [])
+                    for shot in shots if isinstance(shot, dict)]
     return {"ok": not errors, "errors": errors, "warnings": warnings,
-            "shot_count": len(shots), "storyboard": {"aspect_ratio": STORYBOARD_RATIO, "panels": 12}}
+            "shot_count": len(shots),
+            "storyboard": {"aspect_ratio": STORYBOARD_RATIO, "panels": panel_counts}}
 
 
 def _text_motion_chunks(value):

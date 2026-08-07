@@ -33,6 +33,7 @@ if HERE not in sys.path:
 
 import proc_utils
 import aspect_ratio
+import media_qc
 
 
 # ── Ratio dimensions ────────────────────────────────────────────────────
@@ -118,6 +119,10 @@ def derive_ratio(source_path, target_ratio, out_path, *, strategy="auto"):
     proc_utils.run_cmd(cmd, timeout=300)
 
     sha = _file_sha256(out_path)
+    qc_path = os.path.abspath(out_path) + ".qc.json"
+    qc = media_qc.check(out_path, profile="formal", expected_ratio=target_ratio,
+                        audio_required=False, report_path=qc_path)
+    media_qc.require_pass(qc)
 
     return {
         "ratio": target_ratio,
@@ -127,6 +132,8 @@ def derive_ratio(source_path, target_ratio, out_path, *, strategy="auto"):
         "source_ratio": src_ratio,
         "source_resolution": [src_w, src_h],
         "target_resolution": [tgt_w, tgt_h],
+        "media_qc": qc,
+        "media_qc_path": qc_path,
     }
 
 

@@ -21,6 +21,7 @@ import subprocess
 import tempfile
 import math
 import re
+import glob
 from datetime import datetime
 
 
@@ -41,6 +42,15 @@ def _ffmpeg_bins():
         from static_ffmpeg import run as sfrun
         ff2, fp2 = sfrun.get_or_fetch_platform_executables_else_raise()
         return ff2, fp2
+    except Exception:
+        pass
+    try:
+        import static_ffmpeg
+        root = os.path.dirname(os.path.abspath(static_ffmpeg.__file__))
+        matches = glob.glob(os.path.join(root, "bin", "**", "ffmpeg"), recursive=True)
+        probes = glob.glob(os.path.join(root, "bin", "**", "ffprobe"), recursive=True)
+        if matches and probes and os.path.dirname(matches[0]) == os.path.dirname(probes[0]):
+            return matches[0], probes[0]
     except Exception:
         pass
     try:

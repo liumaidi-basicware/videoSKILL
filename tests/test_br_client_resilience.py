@@ -97,7 +97,7 @@ class RequestRetryTests(unittest.TestCase):
         self.assertEqual(calls, [
             ("/ai/createImage", "generated-id"),
             ("/v1/image-generations", "image-id"),
-            ("/ai/createVideo", "video-id"),
+            ("/v1/video-generations", "video-id"),
         ])
 
 
@@ -140,6 +140,12 @@ class AtomicDownloadTests(unittest.TestCase):
             self.assertTrue(br_client._peer_is_acceptable("10.0.0.5"))
         with mock.patch.dict(os.environ, {"HTTPS_PROXY": ""}, clear=False):
             self.assertFalse(br_client._peer_is_acceptable("10.0.0.5"))
+
+    def test_all_proxy_peer_is_allowed_for_download_peer_validation(self):
+        with mock.patch.dict(os.environ, {"ALL_PROXY": "http://proxy.local:7890"}, clear=False), \
+                mock.patch.object(br_client.socket, "getaddrinfo", return_value=[
+                    (2, 1, 6, "", ("10.0.0.8", 7890))]):
+            self.assertTrue(br_client._peer_is_acceptable("10.0.0.8"))
 
     def test_stream_without_length_stops_at_size_limit(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -250,7 +256,11 @@ class HostImageCacheTests(unittest.TestCase):
             f.write(b"\x89PNG\r\n\x1a\n" + b"first" * 8)
         try:
             with mock.patch.object(br_client, "create_image",
-                                   side_effect=[["https://x/one"], ["https://x/two"]]) as create:
+                                   side_effect=AssertionError("legacy sync path used")), \
+                 mock.patch.object(br_client, "create_image_generation",
+                                   side_effect=["task-one", "task-two"]) as create, \
+                 mock.patch.object(br_client, "wait_image_generation",
+                                   side_effect=[["https://x/one"], ["https://x/two"]]):
                 self.assertEqual(br_client.host_image("sk-secret", path), "https://x/one")
                 self.assertEqual(br_client.host_image("sk-secret", path), "https://x/one")
                 with open(path, "wb") as f:
@@ -268,15 +278,20 @@ class HostImageCacheTests(unittest.TestCase):
             image.flush()
             with mock.patch.object(
                     br_client, "create_image",
-                    side_effect=[br_client.BRError("timeout after 180s"),
-                                 ["https://x/hosted.png"]]) as create:
+                    side_effect=AssertionError("legacy sync path used")), \
+                    mock.patch.object(
+                        br_client, "create_image_generation",
+                        return_value="task-host") as create, \
+                    mock.patch.object(
+                        br_client, "wait_image_generation",
+                        side_effect=[br_client.BRError("timeout after 180s"),
+                                     ["https://x/hosted.png"]]) as wait:
                 result = br_client.host_image("sk-secret", image.name, timeout=600)
         self.assertEqual(result, "https://x/hosted.png")
-        self.assertEqual(create.call_count, 2)
-        first, second = create.call_args_list
-        self.assertEqual(first.kwargs["request_id"], second.kwargs["request_id"])
-        self.assertEqual(first.kwargs["timeout"], 600)
-        self.assertEqual(second.kwargs["timeout"], 600)
+        self.assertEqual(create.call_count, 1)
+        self.assertEqual(wait.call_count, 2)
+        self.assertEqual(wait.call_args_list[0].args[1], "task-host")
+        self.assertEqual(wait.call_args_list[1].args[1], "task-host")
 
 
 class AnalyzeImageTimeoutTests(unittest.TestCase):

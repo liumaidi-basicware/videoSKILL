@@ -170,6 +170,20 @@ class OfflineFormalDeliveryE2ETests(unittest.TestCase):
         self.assertEqual(status["next_action"], "approve_brief")
         self.assertEqual(status["customer_preview"], [os.path.abspath(brief)])
 
+    def test_video_stage_rejects_review_list_before_manifest_write(self):
+        segment = {"id": "s1", "video_handoff_fingerprint": "handoff"}
+        segments = self.write_json(
+            "segments.json", {"client": "acme", "run_id": "offline-1",
+                              "segments": [segment]})
+        results = self.write_json(
+            "results.json", [{"segment_id": "s1", "take_fingerprint": "take"}])
+        reviews = self.write_json("reviews.json", [{"segment_id": "s1"}])
+        with self.assertRaisesRegex(ValueError, "VIDEO_STAGE_REVIEWS_MAP_REQUIRED"):
+            ss.record_video_stage_pending(
+                self.manifest, self.manifest_path, client="acme",
+                segments_path=segments, results_path=results,
+                basecut_path=self.write("basecut.mp4"), reviews_path=reviews)
+
 
 if __name__ == "__main__":
     unittest.main()

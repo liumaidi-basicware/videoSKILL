@@ -73,7 +73,7 @@ def validate_performance_json(path):
         metrics = v.get("metrics", {})
         if not isinstance(metrics, dict):
             errors.append("videos[%d].metrics must be an object" % i)
-        elif not metrics.get("views"):
+        elif "views" not in metrics:
             errors.append("videos[%d].metrics.views is required" % i)
 
     # Learnings array

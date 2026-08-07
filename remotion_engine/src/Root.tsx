@@ -6,6 +6,7 @@ import { ContentComposition } from "./content/ContentComposition";
 import { ContentSpec } from "./content/contentTypes";
 import { HorizontalKinetic } from "./HorizontalKinetic";
 import { HorizontalKineticProps } from "./types";
+import { ShotcraftComposition, ShotcraftSpec } from "./ShotcraftComposition";
 
 // 默认 props（无 --props 时也能预览）。真实渲染由 hf/remotion 引擎注入 shotlist JSON。
 const defaultProps: ShotList = {
@@ -61,6 +62,20 @@ export const RemotionRoot: React.FC = () => {
         calculateMetadata={({ props }) => {
           const p = props as unknown as HorizontalKineticProps;
           return {durationInFrames: Math.max(1, Math.round((p.durationInSeconds || 1) * (p.scenes?.length ? 30 : 30))), fps: 30, width: 1920, height: 1080};
+        }}
+      />
+      <Composition
+        id="Shotcraft"
+        component={ShotcraftComposition as React.FC<Record<string, unknown>>}
+        durationInFrames={150}
+        fps={30}
+        width={1080}
+        height={1920}
+        defaultProps={{width: 1080, height: 1920, fps: 30, shots: [{id:"demo", card_id:"spotlight-hero-card", durationInFrames:150}]} as unknown as Record<string, unknown>}
+        calculateMetadata={({ props }) => {
+          const p = props as unknown as ShotcraftSpec;
+          const total = (p.shots || []).reduce((s, shot) => s + Math.max(1, shot.durationInFrames), 0) || 150;
+          return {durationInFrames: total, fps: p.fps || 30, width: p.width || 1080, height: p.height || 1920};
         }}
       />
       <Composition

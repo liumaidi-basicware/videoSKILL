@@ -1,6 +1,6 @@
 ---
 name: basicrouter-multimodal-api
-description: "Call the BasicRouter (basic-ware.ai) unified multimodal HTTP API — OpenAI-compatible chat/LLM, image generation/edit, and async video generation (text-to-video, image-to-video, digital-human). Use when building agents/skills that generate text, images, or video through BasicRouter, when discovering available model IDs, or when wiring the async video submit-poll pattern. Covers auth, the {code,message,data} envelope, the createVideo videoType matrix, and the /employee/models discovery quirk."
+description: "Call the BasicRouter (basic-ware.ai) unified multimodal HTTP API — OpenAI-compatible chat/LLM, async image generation/edit, and async video generation (text-to-video, image-to-video, digital-human). Use when building agents/skills that generate text, images, or video through BasicRouter, when discovering available model IDs, or when wiring the async submit-poll retrieve pattern. Covers auth, the {code,message,data} envelope, the videoType matrix, and the /employee/models discovery quirk."
 version: 1.0.0
 license: MIT
 metadata:
@@ -36,15 +36,15 @@ Pitfalls that waste time:
 |---|---|---|---|
 | Chat / LLM | POST | `/v1/chat/completions` | OpenAI-compatible; supports `stream:true` (SSE, 300s window). **Use streaming for slow reasoning models** (kimi-k3) or the gateway drops the idle connection — see `br_client.chat_stream()` |
 | Vision / multimodal chat (image INPUT) | POST | `/v1/chat/completions` | BasicRouter content-block format (`input_text`/`input_image`), NOT OpenAI vision format — see dedicated section below |
-| Image gen / img2img | POST | `/ai/createImage` | sync → `data.imageUrls[]` |
-| Video gen | POST | `/ai/createVideo` | **async** → `data.taskId` + `status` |
-| Video poll | GET | `/ai/getVideoByTaskId?taskId=<id>` | poll every 5–10s → `videoUrl` when `status=succeeded` |
+| Image gen / img2img | POST | `/v1/image-generations` | **async** → `data.taskId`; retrieve with `GET /v1/image-generations/{taskId}` |
+| Video gen | POST | `/v1/video-generations` | **async** → `data.taskId`; retrieve with `GET /v1/video-generations/{taskId}` |
+| Video poll | GET | `/v1/video-generations/{taskId}` | poll every 5–10s → `videoUrl` when `status=succeeded` |
 | Model discovery | GET | `/employee/models?category=video\|image\|text` | **no auth needed**; returns full catalog |
 
 ### Model discovery quirk (important)
 `/v1/models` (OpenAI-style) returns **only chat/LLM** model IDs — video and image models are ABSENT there. To enumerate video/image models and their capabilities use `GET /employee/models?category=video` (and `=image`). That endpoint also returns per-model `videoDurationMin` and `allowVideoType`. See `scripts/probe_models.py`.
 
-## Async video pattern (createVideo)
+## Async video pattern (createVideo / video-generations)
 
 `videoType` matrix (each model advertises which it supports via `allowVideoType`):
 
@@ -56,18 +56,18 @@ Pitfalls that waste time:
 | 4 | image-to-video (reference image) — used for character/style/digital-human anchoring |
 | 5 | multi-image reference (fuse product + person + scene) |
 
-`urls` (array) is required whenever `videoType != 1`. Other body fields: `text` (prompt, required), `resolution` ("720p"), `ratio` ("9:16","16:9"), `duration` (seconds, integer ≥ model's `videoDurationMin`).
+`imageUrls` (array) is required whenever `videoType != 1`. Other body fields: `text` (prompt, required), `resolution` ("720p"), `ratio` ("9:16","16:9"), `duration` (seconds, integer ≥ model's `videoDurationMin`).
 
 ```bash
 # submit
-curl -s -X POST "$BASE/ai/createVideo" -H "Authorization: Bearer $KEY" \
+curl -s -X POST "$BASE/v1/video-generations" -H "Authorization: Bearer $KEY" \
   -H "Content-Type: application/json" -d '{
     "model":"kling-v3-omni-video","videoType":4,
-    "urls":["https://.../portrait.png"],
+    "imageUrls":["https://.../portrait.png"],
     "text":"...prompt...","resolution":"720p","ratio":"9:16","duration":8}'
 # → data.taskId
 # poll every 5-10s until data.status == succeeded, then read data.videoUrl
-curl -s "$BASE/ai/getVideoByTaskId?taskId=$TASK" -H "Authorization: Bearer $KEY"
+curl -s "$BASE/v1/video-generations/$TASK" -H "Authorization: Bearer $KEY"
 ```
 Poll cadence 5–10s; total wait 60–300s depending on model. `lastFrameUrl` also returned (useful to chain first→last-frame shots).
 

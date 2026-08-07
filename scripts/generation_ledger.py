@@ -7,6 +7,8 @@ import hashlib
 from datetime import datetime
 
 from project_utils import FileLock
+import schema_validate
+import schema_validate
 
 
 class LedgerCorruptionError(ValueError):
@@ -33,6 +35,14 @@ def append_event(path, event, *, lock_timeout=10.0, stale_after=300.0, **fields)
     item = {"schema_version": 1, "event_id": str(uuid.uuid4()),
             "timestamp": datetime.now().isoformat(timespec="seconds"), "event": event}
     item.update(fields)
+    # 契约强制：generation-run schema 运行时校验（fail-closed，防畸形事件污染账本）
+    try:
+        schema_validate.enforce(item, "generation-run",
+                                context="generation_ledger.append_event")
+    except schema_validate.SchemaContractError as exc:
+        raise LedgerCorruptionError(str(exc))
+    # 契约强制：generation-run schema 运行时校验（fail-closed，防劣化事件入账）
+    schema_validate.enforce(item, "generation-run", context="generation_ledger.append_event")
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     if os.path.exists(path) and os.path.islink(path):
         raise LedgerCorruptionError("LEDGER_SYMLINK_BLOCKED")
